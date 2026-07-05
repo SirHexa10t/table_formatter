@@ -1,0 +1,16 @@
+lines that start with "--" are comments. Don't format them.
+
+multi-lines: use a single . following separator?
+===========
+aaa  something      some thing   
+bbb  something      some-thing
+     .or other
+     .and whatever  
+ccc  huh            hah
+
+separate is_numerical cases.
+And add:
+    [num]\s*/[num]\s*[num]...  like 4/5 or 10/20/30
+Generally clean away spaces before regex?
+
+make sure that it's possible to skip header-line
