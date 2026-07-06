@@ -12,9 +12,9 @@ use ordered_float::OrderedFloat;
 
 // ——— Configuration ——————————————————————————————
 const DEFAULT_SEPARATOR: usize = 2;
+const DEFAULT_THRESHOLD: usize = 2;
 
 // Regular expression patterns
-static SPLIT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2,}|\t+").unwrap());
 static NUMERIC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[+-]?[0-9]+(?:\.[0-9]+)?\s?[pKkMmGgTt]?(?:i?[bB]?(/s)?|%|Hz|@[0-9]+Hz)?$").unwrap()
 });
@@ -74,8 +74,14 @@ fn evaluate_numeric_item(s: &str) -> f64 {
     0.0
 }
 
-fn split_row(line: &str) -> Vec<String> {
-    SPLIT_PATTERN.split(line.trim()).map(String::from).collect()
+/// Column-splitting regex for a given threshold: a run of `threshold`+ spaces (never fewer
+/// than 2, so multi-word cells stay intact) or any run of tabs.
+fn split_pattern(threshold: usize) -> Regex {
+    Regex::new(&format!(r"\s{{{},}}|\t+", threshold.max(2))).unwrap()
+}
+
+fn split_row(line: &str, pattern: &Regex) -> Vec<String> {
+    pattern.split(line.trim()).map(String::from).collect()
 }
 
 fn detect_column_properties(rows: &[Vec<String>]) -> (Vec<usize>, Vec<bool>) {
@@ -125,9 +131,10 @@ fn format_row(cells: &[String], widths: &[usize], is_numeric: &[bool], sep_width
 }
 
 // ——— Core formatting functions ——————————————————————————————————
-pub fn format_table(lines: &[String], separator: usize, col_idx: Option<usize>) -> Vec<String> {
+pub fn format_table(lines: &[String], separator: usize, threshold: usize, col_idx: Option<usize>) -> Vec<String> {
     // Split rows - always use par_iter, rayon will handle the parallelization decision
-    let mut rows: Vec<Vec<String>> = lines.par_iter().map(|line| split_row(line)).collect();
+    let pattern = split_pattern(threshold);
+    let mut rows: Vec<Vec<String>> = lines.par_iter().map(|line| split_row(line, &pattern)).collect();
     let (widths, is_numeric) = detect_column_properties(&rows);
 
     // sort, if asked to
@@ -151,8 +158,8 @@ pub fn format_table(lines: &[String], separator: usize, col_idx: Option<usize>) 
         .collect()
 }
 
-fn print_table(lines: &[String], separator: usize, col_idx: Option<usize>) {
-    format_table(lines, separator, col_idx)
+fn print_table(lines: &[String], separator: usize, threshold: usize, col_idx: Option<usize>) {
+    format_table(lines, separator, threshold, col_idx)
         .iter()
         .for_each(|line| println!("{line}"));
 }
@@ -168,6 +175,11 @@ pub struct Args {
     /// Number of spaces to separate columns
     #[arg(short, long, default_value_t = DEFAULT_SEPARATOR)]
     separator: usize,
+
+    /// Minimum run of spaces treated as a column break (tabs always break); floored at 2, so
+    /// a value with a couple of interior spaces stays in one cell.
+    #[arg(short, long, default_value_t = DEFAULT_THRESHOLD)]
+    threshold: usize,
 
     /// Sort by column index (0-based), Header row is kept on top.
     #[arg(long)]
@@ -211,7 +223,7 @@ pub fn run_with(args: Args) -> io::Result<()> {
             .collect()
     };
 
-    print_table(&lines, args.separator, args.sort);
+    print_table(&lines, args.separator, args.threshold, args.sort);
     Ok(())
 }
 

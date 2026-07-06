@@ -1,6 +1,6 @@
 use std::fs::File;
 use assert_cmd::Command;
-use crate::{format_table, strip_ansi, is_numeric_or_neutral, DEFAULT_SEPARATOR};
+use crate::{format_table, strip_ansi, is_numeric_or_neutral, DEFAULT_SEPARATOR, DEFAULT_THRESHOLD};
 use test_case::test_case;
 
 // numerical column needs to align right
@@ -155,6 +155,15 @@ fn to_strings(arr: &[&str]) -> Vec<String> {
     arr.iter().map(|s| s.to_string()).collect()
 }
 
+#[test]
+fn threshold_widens_what_counts_as_a_column_break() {
+    let input = to_strings(&["a  b"]); // one run of two spaces
+    // default threshold (2): the two spaces are a column break, re-spaced to the separator
+    assert_eq!(format_table(&input, 4, DEFAULT_THRESHOLD, None), to_strings(&["a    b"]));
+    // threshold 3: two spaces fall below the break, so it stays one cell (unchanged)
+    assert_eq!(format_table(&input, 4, 3, None), to_strings(&["a  b"]));
+}
+
 fn assert_cmd_and_print(command: &mut Command) -> Vec<String> {
     let output = command.output()
         .expect("failed to execute process");
@@ -186,7 +195,7 @@ fn run_with_piped_data(piped: &str) -> Vec<String> {
     )
 }
 fn direct_test(input: &[&str], expected: &[&str]) {  // call the actual function directly
-    assert_eq!(format_table(&to_strings(input), DEFAULT_SEPARATOR, None), to_strings(expected));
+    assert_eq!(format_table(&to_strings(input), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None), to_strings(expected));
 }
 
 fn file_input_test(input: &[&str], expected: &[&str]) {  // run the program through its bin-file and provide a temp-file
@@ -212,7 +221,7 @@ fn piped_input_test(input: &[&str], expected: &[&str]) {
 }
 
 fn check_immutability_on_2nd_run(input: &[&str]) {  // input is a pre-organized table. There's nothing to further organize.
-    assert_eq!(format_table(&to_strings(input), DEFAULT_SEPARATOR, None), to_strings(input));
+    assert_eq!(format_table(&to_strings(input), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None), to_strings(input));
 }
 
 #[test_case(SAMPLE_INPUT, SAMPLE_OUTPUT)]
@@ -292,8 +301,8 @@ fn test_sorting() {
         "A  1  c  d  e  f  g",
     ];
 
-    assert_eq!(format_table(&to_strings(VARYING_LENGTH_TABLE), DEFAULT_SEPARATOR, Some(0)), to_strings(VARYING_LENGTH_TABLE_SORT0_ORGANIZED));
-    assert_eq!(format_table(&to_strings(VARYING_LENGTH_TABLE), DEFAULT_SEPARATOR, Some(1)), to_strings(VARYING_LENGTH_TABLE_SORT1_ORGANIZED));
+    assert_eq!(format_table(&to_strings(VARYING_LENGTH_TABLE), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, Some(0)), to_strings(VARYING_LENGTH_TABLE_SORT0_ORGANIZED));
+    assert_eq!(format_table(&to_strings(VARYING_LENGTH_TABLE), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, Some(1)), to_strings(VARYING_LENGTH_TABLE_SORT1_ORGANIZED));
 
 
     const SORT_TESTER: &[&str] = &[
@@ -324,8 +333,8 @@ fn test_sorting() {
         "3     9  3.5K",
     ];
 
-    assert_eq!(format_table(&to_strings(SORT_TESTER), DEFAULT_SEPARATOR, Some(1)), to_strings(SORT_TESTER_SORT1));
-    assert_eq!(format_table(&to_strings(SORT_TESTER), DEFAULT_SEPARATOR, Some(2)), to_strings(SORT_TESTER_SORT2));
+    assert_eq!(format_table(&to_strings(SORT_TESTER), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, Some(1)), to_strings(SORT_TESTER_SORT1));
+    assert_eq!(format_table(&to_strings(SORT_TESTER), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, Some(2)), to_strings(SORT_TESTER_SORT2));
 
 }
 
