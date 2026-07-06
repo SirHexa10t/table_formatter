@@ -1,6 +1,5 @@
 use std::fs::File;
-use assert_cmd::Command;
-use crate::{format_table, strip_ansi, is_numeric_or_neutral, DEFAULT_SEPARATOR, DEFAULT_THRESHOLD};
+use crate::{format_table, read_from, read_lines, strip_ansi, is_numeric_or_neutral, DEFAULT_SEPARATOR, DEFAULT_THRESHOLD};
 use test_case::test_case;
 
 // numerical column needs to align right
@@ -164,35 +163,17 @@ fn threshold_widens_what_counts_as_a_column_break() {
     assert_eq!(format_table(&input, 4, 3, None), to_strings(&["a  b"]));
 }
 
-fn assert_cmd_and_print(command: &mut Command) -> Vec<String> {
-    let output = command.output()
-        .expect("failed to execute process");
-
-    assert!(
-        output.status.success(),
-        "program exited with error: {}\n--- stderr ---\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(String::from)
-        .collect::<Vec<_>>()
+// Exercise the CLI's input handling + formatting in-process: read the input exactly as the
+// binary would (via `read_lines` / `read_from`), then format it. `main` is only
+// `table_formatter::run()`, so this covers the same logic without needing the compiled
+// binary — which `cargo test` doesn't build for unit tests.
+fn format_arg(arg: &str) -> Vec<String> {
+    format_table(&read_lines(arg).unwrap(), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None)
 }
 
-fn run_with_cmdline_arg(arg: &str) -> Vec<String> {
-    assert_cmd_and_print(
-        Command::cargo_bin("table_formatter").unwrap()
-            .arg(arg)
-    )
-}
-
-fn run_with_piped_data(piped: &str) -> Vec<String> {
-    assert_cmd_and_print(
-        Command::cargo_bin("table_formatter").unwrap()
-            .write_stdin(piped)
-    )
+fn format_stdin(piped: &str) -> Vec<String> {
+    let lines = read_from(std::io::Cursor::new(piped.as_bytes().to_vec())).unwrap();
+    format_table(&lines, DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None)
 }
 fn direct_test(input: &[&str], expected: &[&str]) {  // call the actual function directly
     assert_eq!(format_table(&to_strings(input), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None), to_strings(expected));
@@ -205,18 +186,18 @@ fn file_input_test(input: &[&str], expected: &[&str]) {  // run the program thro
     let temp_file = NamedTempFile::new().unwrap();
     fs::write(&temp_file, input.join("\n")).unwrap();
 
-    let result = run_with_cmdline_arg(temp_file.path().to_str().unwrap());
+    let result = format_arg(temp_file.path().to_str().unwrap());
 
     assert_eq!(result, to_strings(expected));
 }
 
 fn string_input_test(input: &[&str], expected: &[&str]) {
-    let result = run_with_cmdline_arg(&input.join("\n"));
+    let result = format_arg(&input.join("\n"));
     assert_eq!(result, to_strings(expected));
 }
 
 fn piped_input_test(input: &[&str], expected: &[&str]) {
-    let result = run_with_piped_data(&input.join("\n"));
+    let result = format_stdin(&input.join("\n"));
     assert_eq!(result, to_strings(expected));
 }
 
@@ -243,7 +224,7 @@ fn test_sets(input: &[&str], expected: &[&str]) {
 
 #[test_case("testing/edf4.1_ranger_testfile.csv")]
 fn test_with_large_file(input_file: &str) {  // covers test for symbols that take a different number of chars than displayed
-    let result = run_with_cmdline_arg(input_file);
+    let result = format_arg(input_file);
 
     let containment_checks = vec![
         ("Type           LV  LV                                 DPS   RDPS     DPM  Ammo  \"Rate of Fire (fire/sec)\"  Damage  \"Reload (sec)\"  \"Range (m)\"  Accuracy                    Zoom  Lock time  -    -        time per mag", "Header line missing or messed-up"),
@@ -262,7 +243,7 @@ fn test_with_large_file(input_file: &str) {  // covers test for symbols that tak
 fn test_with_non_utf8_chars(input_file: &str) {
     use std::io::{BufReader, Read};
 
-    let result = run_with_cmdline_arg(input_file);
+    let result = format_arg(input_file);
 
     // Read raw bytes (no UTF-8 assumption)
     let mut buf = Vec::new();
@@ -391,4 +372,22 @@ fn test_is_numeric_or_neutral() {
     for val in non_numeric {
         assert!(!is_numeric_or_neutral(val), "{} should not be numeric", val);
     }
+}
+
+#[test]
+fn test_read_lines_file_inline_and_reader() {
+    use std::io::Cursor;
+
+    // inline data (one line or many) is split as-is, never mistaken for a path
+    assert_eq!(read_lines("a  b").unwrap(), to_strings(&["a  b"]));
+    assert_eq!(read_lines("x\ny").unwrap(), to_strings(&["x", "y"]));
+
+    // an existing file is read
+    let temp_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(&temp_file, "one\ntwo\n").unwrap();
+    assert_eq!(read_lines(temp_file.path().to_str().unwrap()).unwrap(), to_strings(&["one", "two"]));
+
+    // the reader path (used for stdin + files) decodes lossily rather than erroring
+    let lossy = read_from(Cursor::new(vec![b'a', 0xFF, b'\n', b'b'])).unwrap();
+    assert_eq!(lossy, to_strings(&["a\u{fffd}", "b"]));
 }

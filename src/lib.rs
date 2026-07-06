@@ -1,8 +1,9 @@
 use clap::Parser;
 use rayon::prelude::*;
 use regex::Regex;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, Read};
 use std::fs::File;
+use std::path::Path;
 use std::sync::LazyLock;
 use itertools::izip;
 use std::fmt::Write;
@@ -204,25 +205,36 @@ where
     run_with(Args::parse_from(args))
 }
 
-/// Run with an already-parsed [`Args`]. This lets a dependent crate embed `Args`
+/// Read a command's input as lines from whichever source fits `input` — the "a file, a
+/// pipe, or inline text" convenience, with no external dependency:
+/// - `"-"` (or an empty string) reads stdin,
+/// - a path to an existing file reads that file,
+/// - anything else is treated as inline data and split into lines.
+///
+/// The file-existence check means a one-line inline string is handled as data rather than
+/// mistaken for a path (which previously panicked in `File::open`).
+pub fn read_lines(input: &str) -> io::Result<Vec<String>> {
+    if input == "-" || input.is_empty() {
+        return read_from(io::stdin().lock());
+    }
+    if Path::new(input).is_file() {
+        return read_from(File::open(input)?);
+    }
+    Ok(input.lines().map(String::from).collect())
+}
+
+/// Collect a reader's contents as lines, decoding UTF-8 lossily so stray bytes don't abort.
+pub(crate) fn read_from<R: Read>(mut reader: R) -> io::Result<Vec<String>> {
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).lines().map(String::from).collect())
+}
+
+/// Run with an already-parsed [`Args`]. This lets a dependent crate embed [`Args`]
 /// directly in its own clap CLI (e.g. as a `Subcommand` variant) and hand it
 /// straight here — so the argument definitions live only in this crate.
 pub fn run_with(args: Args) -> io::Result<()> {
-    // get the data from input (file / arg-str / stdin)
-    let lines: Vec<String> = if args.input == "-" {
-        io::stdin().lock().lines().collect::<Result<_, _>>()?
-    } else if args.input.contains('\n') {
-        // multiline string provided directly → treat as raw data rather than filepath
-        args.input.lines().map(|s| s.to_string()).collect()
-    } else {
-        let mut buf = Vec::new();
-        BufReader::new(File::open(args.input).unwrap()).read_to_end(&mut buf)?;
-        String::from_utf8_lossy(&buf)  // replaces invalid utf8 with '�'
-            .lines()
-            .map(|s| s.to_string())
-            .collect()
-    };
-
+    let lines = read_lines(&args.input)?;
     print_table(&lines, args.separator, args.threshold, args.sort);
     Ok(())
 }
