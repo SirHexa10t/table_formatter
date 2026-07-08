@@ -1,7 +1,7 @@
 
 [package]
 name = "table_formatter"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 description = "Align whitespace-delimited columns into a neat table"
 
@@ -10,15 +10,11 @@ clap = { version = "4.5.45", features = ["derive"] }
 regex = "1.11.1"
 rayon = "1.11"
 console = "0.16.0"
-itertools = "0.14.0"
 ordered-float = "5.0.0"
 
 [dev-dependencies]
 tempfile = "3.20.0"
 test-case = "3.3.1"
-
-[features]
-cli_tests = []
 
 [profile.release]
 strip = true    # strip symbols from the binary (smaller binary). BREAKS WEB-ASSEMBLY BUILDS!

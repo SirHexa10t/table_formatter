@@ -1,0 +1,118 @@
+# ANSI-handling variant shootout
+date:    2026-07-08
+cpu:     Intel(R) Core(TM) i7-1065G7 CPU @ 1.30GHz, 8 cores
+method:  4 binaries interleaved per round, 6 rounds, min taken per cell —
+         immune to the thermal drift that skews sequential benchmark runs.
+         Variants are behavior-identical: each passed the full 35-test suite.
+
+## min real (s) — rows: scenario, cols: variant
+scenario                    current  width-cache  clean-split  clean-2pass
+plain-300k-format             0.476        0.518        0.571        0.671
+colored-300k-format           0.687        0.671        0.706        0.877
+plain-30k-text-sort           0.058        0.068        0.057        0.066
+colored-30k-text-sort         0.067        0.071        0.074        0.072
+
+## min user CPU (s)
+scenario                    current  width-cache  clean-split  clean-2pass
+plain-300k-format             1.140        1.386        1.451        1.458
+colored-300k-format           2.053        1.868        1.816        2.033
+plain-30k-text-sort           0.110        0.119        0.113        0.123
+colored-30k-text-sort         0.154        0.141        0.147        0.166
+
+## all runs (round variant scenario real user sys)
+1 current plain-300k-format 0.499 1.272 0.399
+1 current colored-300k-format 0.687 2.127 0.436
+1 current plain-30k-text-sort 0.061 0.119 0.029
+1 current colored-30k-text-sort 0.076 0.158 0.036
+1 width-cache plain-300k-format 0.657 1.454 0.555
+1 width-cache colored-300k-format 0.785 2.044 0.541
+1 width-cache plain-30k-text-sort 0.084 0.132 0.051
+1 width-cache colored-30k-text-sort 0.099 0.176 0.041
+1 clean-split plain-300k-format 0.832 1.573 0.587
+1 clean-split colored-300k-format 0.881 2.189 0.718
+1 clean-split plain-30k-text-sort 0.070 0.129 0.054
+1 clean-split colored-30k-text-sort 0.087 0.172 0.037
+1 clean-2pass plain-300k-format 0.784 1.729 0.717
+1 clean-2pass colored-300k-format 1.020 2.379 0.812
+1 clean-2pass plain-30k-text-sort 0.091 0.149 0.056
+1 clean-2pass colored-30k-text-sort 0.101 0.194 0.046
+2 current plain-300k-format 0.476 1.211 0.358
+2 current colored-300k-format 0.708 2.136 0.410
+2 current plain-30k-text-sort 0.088 0.125 0.040
+2 current colored-30k-text-sort 0.086 0.176 0.037
+2 width-cache plain-300k-format 0.610 1.537 0.519
+2 width-cache colored-300k-format 0.780 1.994 0.494
+2 width-cache plain-30k-text-sort 0.068 0.129 0.031
+2 width-cache colored-30k-text-sort 0.092 0.155 0.042
+2 clean-split plain-300k-format 0.789 1.604 0.614
+2 clean-split colored-300k-format 0.809 2.088 0.586
+2 clean-split plain-30k-text-sort 0.065 0.128 0.040
+2 clean-split colored-30k-text-sort 0.088 0.147 0.062
+2 clean-2pass plain-300k-format 0.819 1.764 0.705
+2 clean-2pass colored-300k-format 0.955 2.230 0.686
+2 clean-2pass plain-30k-text-sort 0.125 0.152 0.052
+2 clean-2pass colored-30k-text-sort 0.102 0.186 0.058
+3 current plain-300k-format 0.495 1.269 0.361
+3 current colored-300k-format 0.723 2.076 0.407
+3 current plain-30k-text-sort 0.059 0.110 0.040
+3 current colored-30k-text-sort 0.075 0.154 0.041
+3 width-cache plain-300k-format 0.569 1.490 0.443
+3 width-cache colored-300k-format 0.747 2.023 0.493
+3 width-cache plain-30k-text-sort 0.070 0.119 0.041
+3 width-cache colored-30k-text-sort 0.074 0.141 0.035
+3 clean-split plain-300k-format 0.994 1.489 0.474
+3 clean-split colored-300k-format 0.754 1.992 0.524
+3 clean-split plain-30k-text-sort 0.058 0.114 0.037
+3 clean-split colored-30k-text-sort 0.075 0.149 0.051
+3 clean-2pass plain-300k-format 0.710 1.619 0.593
+3 clean-2pass colored-300k-format 0.977 2.185 0.709
+3 clean-2pass plain-30k-text-sort 0.072 0.123 0.056
+3 clean-2pass colored-30k-text-sort 0.090 0.177 0.047
+4 current plain-300k-format 0.568 1.299 0.411
+4 current colored-300k-format 0.934 2.110 0.417
+4 current plain-30k-text-sort 0.061 0.127 0.024
+4 current colored-30k-text-sort 0.067 0.156 0.024
+4 width-cache plain-300k-format 0.608 1.483 0.411
+4 width-cache colored-300k-format 0.898 1.868 0.498
+4 width-cache plain-30k-text-sort 0.083 0.132 0.035
+4 width-cache colored-30k-text-sort 0.091 0.160 0.046
+4 clean-split plain-300k-format 0.595 1.587 0.466
+4 clean-split colored-300k-format 0.820 2.128 0.601
+4 clean-split plain-30k-text-sort 0.072 0.113 0.041
+4 clean-split colored-30k-text-sort 0.080 0.147 0.044
+4 clean-2pass plain-300k-format 0.671 1.578 0.585
+4 clean-2pass colored-300k-format 1.045 2.127 0.873
+4 clean-2pass plain-30k-text-sort 0.081 0.137 0.043
+4 clean-2pass colored-30k-text-sort 0.091 0.187 0.038
+5 current plain-300k-format 0.483 1.242 0.415
+5 current colored-300k-format 0.696 2.065 0.431
+5 current plain-30k-text-sort 0.058 0.114 0.035
+5 current colored-30k-text-sort 0.069 0.156 0.033
+5 width-cache plain-300k-format 0.518 1.386 0.450
+5 width-cache colored-300k-format 0.671 1.874 0.484
+5 width-cache plain-30k-text-sort 0.142 0.130 0.040
+5 width-cache colored-30k-text-sort 0.071 0.159 0.036
+5 clean-split plain-300k-format 0.571 1.489 0.551
+5 clean-split colored-300k-format 0.706 1.816 0.470
+5 clean-split plain-30k-text-sort 0.057 0.119 0.030
+5 clean-split colored-30k-text-sort 0.074 0.154 0.040
+5 clean-2pass plain-300k-format 0.684 1.458 0.674
+5 clean-2pass colored-300k-format 0.877 2.109 0.802
+5 clean-2pass plain-30k-text-sort 0.066 0.128 0.035
+5 clean-2pass colored-30k-text-sort 0.099 0.175 0.037
+6 current plain-300k-format 0.607 1.140 0.322
+6 current colored-300k-format 0.800 2.053 0.534
+6 current plain-30k-text-sort 0.061 0.120 0.033
+6 current colored-30k-text-sort 0.087 0.166 0.039
+6 width-cache plain-300k-format 0.567 1.475 0.461
+6 width-cache colored-300k-format 0.811 1.950 0.565
+6 width-cache plain-30k-text-sort 0.070 0.129 0.036
+6 width-cache colored-30k-text-sort 0.077 0.145 0.033
+6 clean-split plain-300k-format 0.727 1.451 0.554
+6 clean-split colored-300k-format 1.019 2.117 0.659
+6 clean-split plain-30k-text-sort 0.076 0.123 0.052
+6 clean-split colored-30k-text-sort 0.082 0.160 0.034
+6 clean-2pass plain-300k-format 0.780 1.630 0.727
+6 clean-2pass colored-300k-format 0.888 2.033 0.690
+6 clean-2pass plain-30k-text-sort 0.070 0.126 0.046
+6 clean-2pass colored-30k-text-sort 0.072 0.166 0.030

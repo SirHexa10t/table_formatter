@@ -1,5 +1,8 @@
 use std::fs::File;
-use crate::{format_table, read_from, read_lines, strip_ansi, is_numeric_or_neutral, DEFAULT_SEPARATOR, DEFAULT_THRESHOLD};
+use crate::{
+    format_table, is_numeric_or_neutral, parse_numeric, read_from, read_lines, run_from,
+    split_pattern, split_row, visible_len, FormatError, FormatOptions,
+};
 use test_case::test_case;
 
 // numerical column needs to align right
@@ -142,10 +145,12 @@ const SPECIAL_CHARS: &[&str] = &[
     "3  X",
 ];
 
+// 🌎 and 🇺🇸 both occupy two terminal cells, so every X lands in the same display column.
+// (🌎 is a single char — padding by chars used to give its row one extra space.)
 const SPECIAL_CHARS_ORGANIZED: &[&str] = &[
     "A   B",
     "1   x",
-    "🌎   X",
+    "🌎  X",
     "🇺🇸  X",
     "3   X",
 ];
@@ -154,29 +159,61 @@ fn to_strings(arr: &[&str]) -> Vec<String> {
     arr.iter().map(|s| s.to_string()).collect()
 }
 
+fn options_with_sort(col: usize) -> FormatOptions {
+    FormatOptions { sort: Some(col), ..Default::default() }
+}
+
+fn format_default(input: &[&str]) -> Vec<String> {
+    format_table(&to_strings(input), &FormatOptions::default()).unwrap()
+}
+
+fn format_sorted(input: &[&str], col: usize) -> Vec<String> {
+    format_table(&to_strings(input), &options_with_sort(col)).unwrap()
+}
+
 #[test]
 fn threshold_widens_what_counts_as_a_column_break() {
     let input = to_strings(&["a  b"]); // one run of two spaces
     // default threshold (2): the two spaces are a column break, re-spaced to the separator
-    assert_eq!(format_table(&input, 4, DEFAULT_THRESHOLD, None), to_strings(&["a    b"]));
+    let wide = FormatOptions { separator: 4, ..Default::default() };
+    assert_eq!(format_table(&input, &wide).unwrap(), to_strings(&["a    b"]));
     // threshold 3: two spaces fall below the break, so it stays one cell (unchanged)
-    assert_eq!(format_table(&input, 4, 3, None), to_strings(&["a  b"]));
+    let strict = FormatOptions { separator: 4, threshold: 3, ..Default::default() };
+    assert_eq!(format_table(&input, &strict).unwrap(), to_strings(&["a  b"]));
+}
+
+#[test]
+fn threshold_below_two_is_floored_to_two() {
+    // a single interior space must never split a cell, even when threshold is 0 or 1
+    let input = to_strings(&["one two  three"]);
+    let expected = format_table(&input, &FormatOptions::default()).unwrap();
+    for threshold in [0, 1] {
+        let opts = FormatOptions { threshold, ..Default::default() };
+        assert_eq!(format_table(&input, &opts).unwrap(), expected);
+    }
+}
+
+#[test]
+fn separator_zero_packs_columns_together() {
+    let input = to_strings(&["aa  b", "c  dd"]);
+    let opts = FormatOptions { separator: 0, ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["aab ", "c dd"]));
 }
 
 // Exercise the CLI's input handling + formatting in-process: read the input exactly as the
-// binary would (via `read_lines` / `read_from`), then format it. `main` is only
-// `table_formatter::run()`, so this covers the same logic without needing the compiled
-// binary — which `cargo test` doesn't build for unit tests.
+// binary would (via `read_lines` / `read_from`), then format it. `main` is only a thin
+// wrapper around `table_formatter::run()`, so this covers the same logic without needing
+// the compiled binary — which `cargo test` doesn't build for unit tests.
 fn format_arg(arg: &str) -> Vec<String> {
-    format_table(&read_lines(arg).unwrap(), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None)
+    format_table(&read_lines(arg).unwrap(), &FormatOptions::default()).unwrap()
 }
 
 fn format_stdin(piped: &str) -> Vec<String> {
     let lines = read_from(std::io::Cursor::new(piped.as_bytes().to_vec())).unwrap();
-    format_table(&lines, DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None)
+    format_table(&lines, &FormatOptions::default()).unwrap()
 }
 fn direct_test(input: &[&str], expected: &[&str]) {  // call the actual function directly
-    assert_eq!(format_table(&to_strings(input), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None), to_strings(expected));
+    assert_eq!(format_default(input), to_strings(expected));
 }
 
 fn file_input_test(input: &[&str], expected: &[&str]) {  // run the program through its bin-file and provide a temp-file
@@ -202,7 +239,7 @@ fn piped_input_test(input: &[&str], expected: &[&str]) {
 }
 
 fn check_immutability_on_2nd_run(input: &[&str]) {  // input is a pre-organized table. There's nothing to further organize.
-    assert_eq!(format_table(&to_strings(input), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, None), to_strings(input));
+    assert_eq!(format_default(input), to_strings(input));
 }
 
 #[test_case(SAMPLE_INPUT, SAMPLE_OUTPUT)]
@@ -282,8 +319,8 @@ fn test_sorting() {
         "A  1  c  d  e  f  g",
     ];
 
-    assert_eq!(format_table(&to_strings(VARYING_LENGTH_TABLE), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, Some(0)), to_strings(VARYING_LENGTH_TABLE_SORT0_ORGANIZED));
-    assert_eq!(format_table(&to_strings(VARYING_LENGTH_TABLE), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, Some(1)), to_strings(VARYING_LENGTH_TABLE_SORT1_ORGANIZED));
+    assert_eq!(format_sorted(VARYING_LENGTH_TABLE, 0), to_strings(VARYING_LENGTH_TABLE_SORT0_ORGANIZED));
+    assert_eq!(format_sorted(VARYING_LENGTH_TABLE, 1), to_strings(VARYING_LENGTH_TABLE_SORT1_ORGANIZED));
 
 
     const SORT_TESTER: &[&str] = &[
@@ -295,11 +332,12 @@ fn test_sorting() {
         "6     8   10T",
         "7     9  288M",
     ];
+    // The sort is stable: the two rows tied at 9 keep their input order (row "3" before "7").
     const SORT_TESTER_SORT1: &[&str] = &[
         "X     X     X",
         "2  1000    2M",
-        "7     9  288M",
         "3     9  3.5K",
+        "7     9  288M",
         "6     8   10T",
         "5     6    3G",
         "4     5    9G",
@@ -314,13 +352,291 @@ fn test_sorting() {
         "3     9  3.5K",
     ];
 
-    assert_eq!(format_table(&to_strings(SORT_TESTER), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, Some(1)), to_strings(SORT_TESTER_SORT1));
-    assert_eq!(format_table(&to_strings(SORT_TESTER), DEFAULT_SEPARATOR, DEFAULT_THRESHOLD, Some(2)), to_strings(SORT_TESTER_SORT2));
+    assert_eq!(format_sorted(SORT_TESTER, 1), to_strings(SORT_TESTER_SORT1));
+    assert_eq!(format_sorted(SORT_TESTER, 2), to_strings(SORT_TESTER_SORT2));
 
 }
 
+// ——— Sorting edge cases (regression tests for B1–B4) ————————————————————
+
 #[test]
-fn test_strip_ansi() {
+fn sorting_by_out_of_range_column_is_a_clean_error() {
+    // B1: this used to panic with index-out-of-bounds
+    let err = format_table(&to_strings(&["a  b", "1  2"]), &options_with_sort(99)).unwrap_err();
+    assert_eq!(err, FormatError::SortColumnOutOfRange { requested: 99, num_cols: 2 });
+    assert_eq!(err.to_string(), "sort column 99 is out of range: the table has 2 column(s)");
+}
+
+#[test]
+fn sorting_empty_input_returns_empty() {
+    // B1: this used to panic in `rows.remove(0)`
+    let out = format_table(&[], &options_with_sort(0)).unwrap();
+    assert!(out.is_empty());
+}
+
+#[test]
+fn sort_column_missing_from_first_row_must_not_panic() {
+    // B1: the header-detection heuristic indexed `rows[0][idx]` unchecked
+    let input = &["a  b", "1  2  3", "4  5  6"];
+    // header pinned; data rows descending by column 2
+    assert_eq!(format_sorted(input, 2), to_strings(&["a  b   ", "4  5  6", "1  2  3"]));
+}
+
+#[test]
+fn first_data_row_with_value_zero_is_sorted_not_pinned() {
+    // B3: a first row whose sort cell evaluates to 0 was mistaken for a header
+    let input = &["0  y", "5  x", "3  z"];
+    assert_eq!(format_sorted(input, 0), to_strings(&["5  x", "3  z", "0  y"]));
+}
+
+#[test]
+fn descending_numeric_sort_keeps_tied_rows_in_input_order() {
+    // B4: sort-then-reverse used to flip the relative order of equal keys
+    let input = &["h  x", "a  5", "b  5", "c  9"];
+    assert_eq!(format_sorted(input, 1), to_strings(&["h  x", "c  9", "a  5", "b  5"]));
+}
+
+#[test]
+fn neutral_cells_sort_below_numbers_in_numeric_columns() {
+    // `-` and missing cells carry no value: they belong at the bottom, in input order
+    let input = &["id  val", "a  3", "b  -", "c  7", "d"];
+    assert_eq!(
+        format_sorted(input, 1),
+        to_strings(&["id  val", "c     7", "a     3", "b     -", "d      "])
+    );
+}
+
+#[test]
+fn header_flag_pins_first_row_even_when_numeric() {
+    let input = to_strings(&["0  y", "5  x", "3  z"]);
+    let opts = FormatOptions { sort: Some(0), header: Some(true), ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["0  y", "5  x", "3  z"]));
+}
+
+#[test]
+fn no_header_flag_sorts_first_row_even_when_text() {
+    let input = to_strings(&["num  word", "9  a", "10  b"]);
+    let opts = FormatOptions { sort: Some(0), header: Some(false), ..Default::default() };
+    // "num" doesn't parse as a number, so it sorts below the real values
+    assert_eq!(
+        format_table(&input, &opts).unwrap(),
+        to_strings(&[" 10  b   ", "  9  a   ", "num  word"])
+    );
+}
+
+#[test]
+fn run_from_reports_invalid_sort_as_clean_io_error() {
+    // the CLI path wraps FormatError as InvalidInput instead of panicking
+    let err = run_from(["table_formatter", "a  b", "--sort", "9"]).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("out of range"));
+}
+
+// ——— Column classification & alignment ———————————————————————————————————
+
+#[test]
+fn ragged_header_does_not_make_text_columns_numeric() {
+    // B2: numeric detection used to skip each column's first *present* cell instead of
+    // the header row — so "foo" below a short header was never inspected
+    let input = &["h1  h2", "a  b  foo", "c  d  3"];
+    assert_eq!(format_default(input), to_strings(&["h1  h2     ", "a   b   foo", "c   d   3  "]));
+}
+
+#[test]
+fn resolutions_sort_by_pixel_count_not_si_scale() {
+    // 'p' is a unit (pixels): 4K (= 4000) > 1440p > 1080p > 720p. It must not mean peta.
+    let input = &["res", "720p", "4K", "1440p", "1080p"];
+    assert_eq!(
+        format_sorted(input, 0),
+        to_strings(&["  res", "   4K", "1440p", "1080p", " 720p"])
+    );
+}
+
+#[test]
+fn remove_trailing_spaces_flag_trims_output_lines() {
+    let input = to_strings(&["h1  h2", "a  b  foo", "c  d  3"]);
+    let opts = FormatOptions { trim_trailing: true, ..Default::default() };
+    assert_eq!(
+        format_table(&input, &opts).unwrap(),
+        to_strings(&["h1  h2", "a   b   foo", "c   d   3"])
+    );
+}
+
+#[test]
+fn wide_glyphs_align_by_display_width() {
+    // 🌎 and 漢 are one *char* but two terminal cells wide; padding must follow cells.
+    // (🇺🇸 is two chars and two cells — it aligns either way, so it can't catch this alone.)
+    let input = &["a  B", "🌎  X", "🇺🇸  X", "漢  X", "bc  X"];
+    assert_eq!(
+        format_default(input),
+        to_strings(&["a   B", "🌎  X", "🇺🇸  X", "漢  X", "bc  X"])
+    );
+}
+
+#[test]
+fn colored_cells_do_not_absorb_padding() {
+    // a colored cell narrower than its column must still get its full padding
+    let input = to_strings(&["name  val", "\u{1b}[32mok\u{1b}[0m  1", "longer  2"]);
+    let expected = to_strings(&[
+        "name    val",
+        "\u{1b}[32mok\u{1b}[0m        1",
+        "longer    2",
+    ]);
+    assert_eq!(format_table(&input, &FormatOptions::default()).unwrap(), expected);
+}
+
+// ——— Color invariance ————————————————————————————————————————————————————
+// Styling characters must never change the layout: the escape sequences are invisible,
+// so a colorized table has to come out with the exact spacing of its plain twin — the
+// codes just ride along.
+
+/// Tiny deterministic PRNG (an LCG) so the "random" coloring is reproducible.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+const SGR_STYLES: &[&str] = &["31", "32", "33", "34", "1", "4", "38;5;208"];
+
+/// Wrap a random selection of cells — whole, or just an inner span of characters — in
+/// ANSI style codes. Cell separators stay untouched, so the table's cells are identical.
+fn colorize_cells(lines: &[String], seed: u64) -> Vec<String> {
+    let mut rng = Lcg(seed);
+    let pattern = split_pattern(2);
+    lines
+        .iter()
+        .map(|line| {
+            let cells: Vec<String> = split_row(line, &pattern)
+                .into_iter()
+                .map(|cell| {
+                    let style = SGR_STYLES[rng.below(SGR_STYLES.len())];
+                    match rng.below(3) {
+                        0 => cell, // leave as-is
+                        1 => format!("\u{1b}[{style}m{cell}\u{1b}[0m"), // whole cell
+                        _ => {
+                            // an inner span of characters
+                            let chars: Vec<char> = cell.chars().collect();
+                            if chars.is_empty() {
+                                return cell;
+                            }
+                            let start = rng.below(chars.len());
+                            let end = start + 1 + rng.below(chars.len() - start);
+                            let head: String = chars[..start].iter().collect();
+                            let mid: String = chars[start..end].iter().collect();
+                            let tail: String = chars[end..].iter().collect();
+                            format!("{head}\u{1b}[{style}m{mid}\u{1b}[0m{tail}")
+                        }
+                    }
+                })
+                .collect();
+            cells.join("  ")
+        })
+        .collect()
+}
+
+fn strip_ansi_lines(lines: &[String]) -> Vec<String> {
+    lines.iter().map(|line| console::strip_ansi_codes(line).to_string()).collect()
+}
+
+#[test]
+fn coloring_cells_never_changes_layout() {
+    let tables: &[&[&str]] = &[
+        SAMPLE_INPUT, SMTOUHOU_DATA, LONG_TABLE, WIDE_TABLE,
+        VARYING_LENGTH_TABLE, MISSING_LINES, SPECIAL_CHARS,
+    ];
+    for (table_idx, table) in tables.iter().enumerate() {
+        let plain = to_strings(table);
+        let expected = strip_ansi_lines(&format_table(&plain, &FormatOptions::default()).unwrap());
+        let expected_sorted =
+            strip_ansi_lines(&format_table(&plain, &options_with_sort(1)).unwrap());
+
+        for seed in [1, 42, 0xC0FFEE] {
+            let colored = colorize_cells(&plain, seed + table_idx as u64);
+
+            let got = strip_ansi_lines(&format_table(&colored, &FormatOptions::default()).unwrap());
+            assert_eq!(got, expected, "layout changed: table {table_idx}, seed {seed}");
+
+            // sorting must be immune too — keys parse straight through the styling
+            let got_sorted =
+                strip_ansi_lines(&format_table(&colored, &options_with_sort(1)).unwrap());
+            assert_eq!(got_sorted, expected_sorted, "sorted layout changed: table {table_idx}, seed {seed}");
+        }
+    }
+}
+
+#[test]
+fn text_sort_ignores_ansi_codes() {
+    // found by the invariance test: a styled cell must sort by its visible text, not by
+    // its escape bytes (which would put every colored cell before every plain one)
+    let input = to_strings(&["name  v", "\u{1b}[32mcherry\u{1b}[0m  1", "apple  2", "banana  3"]);
+    let out = format_table(&input, &options_with_sort(0)).unwrap();
+    assert_eq!(
+        strip_ansi_lines(&out),
+        to_strings(&["name    v", "apple   2", "banana  3", "cherry  1"])
+    );
+}
+
+// ——— Text measurement ————————————————————————————————————————————————————
+
+#[test]
+fn visible_len_counts_terminal_cells() {
+    let cases: &[(&str, usize)] = &[
+        ("abc", 3),
+        ("🌎", 2),                      // one char, two cells
+        ("🇺🇸", 2),                     // two chars, two cells
+        ("漢字", 4),                    // CJK: two cells per glyph
+        ("α", 1),
+        ("cafe\u{301}", 4),             // combining accent takes no cell
+        ("\u{1b}[32m🌎\u{1b}[0m", 2),   // styling adds nothing
+        ("", 0),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(visible_len(text), *expected, "{text:?}");
+    }
+}
+
+#[test]
+fn measure_text_width_already_ignores_ansi() {
+    // P4: `visible_len` used to pre-strip ANSI before `measure_text_width`, which parses
+    // ANSI itself. This pins their agreement on every input — including malformed
+    // escapes — which is what makes the single-parse `visible_len` safe.
+    let corpus = [
+        // well-formed
+        "plain text",
+        "\u{1b}[31mred\u{1b}[0m",
+        "\u{1b}[38;5;208mcolored\u{1b}[0m",
+        "\u{1b}[46m\u{1b}[23mnested\u{1b}[0m",
+        "\u{1b}[31m🌎 wide\u{1b}[0m",
+        "🇺🇸 flag",
+        "漢字 cjk",
+        // malformed / adversarial
+        "\u{1b}",                       // lone ESC
+        "\u{1b}[",                      // bare CSI opener
+        "\u{1b}[31",                    // dangling CSI (no terminator)
+        "a\u{1b}[12",                   // dangling CSI mid-text
+        "text\u{1b}[",                  // trailing opener
+        "\u{1b}[3\u{1b}[0m1m",          // stripping the inner code would recombine "\x1b[31m"
+        "\u{1b}]0;title\u{7}body",      // OSC terminated by BEL
+        "\u{1b}]0;title\u{1b}\\body",   // OSC terminated by ST
+    ];
+    for case in corpus {
+        assert_eq!(
+            console::measure_text_width(case),
+            console::measure_text_width(&console::strip_ansi_codes(case)),
+            "pre-stripping changes the measured width of {case:?}"
+        );
+    }
+}
+
+#[test]
+fn visible_len_sees_through_ansi_codes() {
     let cases = [
         "\u{1b}[38;5;208mthis is my text\u{1b}[0m", "\u{1b}[30mthis is my text\u{1b}[0m",
         "\u{1b}[31mthis is my text\u{1b}[0m", "\u{1b}[32mthis is my text\u{1b}[0m",
@@ -349,9 +665,11 @@ fn test_strip_ansi() {
     ];
 
     for case in cases {
-        assert_eq!(strip_ansi(case), "this is my text");
+        assert_eq!(visible_len(case), "this is my text".len(), "{case:?}");
     }
 }
+
+// ——— Numeric parsing & classification ————————————————————————————————————
 
 #[test]
 fn test_is_numeric_or_neutral() {
@@ -373,6 +691,37 @@ fn test_is_numeric_or_neutral() {
         assert!(!is_numeric_or_neutral(val), "{} should not be numeric", val);
     }
 }
+
+#[test]
+fn parse_numeric_applies_scales_and_units() {
+    let cases: &[(&str, f64)] = &[
+        // plain numbers
+        ("123", 123.0), ("4.5", 4.5), ("+12.5", 12.5), ("-2", -2.0), ("2.000", 2.0),
+        // SI scales, either case, space tolerated
+        ("1k", 1e3), ("3.5K", 3.5e3), ("2M", 2e6), ("2.5G", 2.5e9), ("1T", 1e12),
+        ("1.3 k", 1.3 * 1e3), ("4K", 4e3), ("2k%", 2e3),
+        // binary (1024-based) scales, with and without the B
+        ("2Ki", 2048.0), ("10MiB", 10.0 * 1024f64.powi(2)),
+        ("-1.23Gi", -1.23 * 1024f64.powi(3)), ("5 TiB", 5.0 * 1024f64.powi(4)),
+        // rates, percentages, frequencies
+        ("1.12 kb/s", 1.12 * 1e3), ("2 MB/s", 2e6), ("4.4GB/s", 4.4 * 1e9),
+        ("10%", 10.0), ("60Hz", 60.0),
+        // 'p' is pixels, not peta: the number stands as-is
+        ("1080p", 1080.0), ("720p", 720.0), ("1440p@120Hz", 1440.0),
+        // ANSI-colored numbers still parse
+        ("\u{1b}[31m42\u{1b}[0m", 42.0),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(parse_numeric(text), Some(*expected), "{text}");
+    }
+
+    // non-numbers and neutral markers carry no value
+    for text in ["abc", "", "-", "--", "*", "1.2X", "1.2.3", "1 0", "2/2", "kB", "2%k", "5950X"] {
+        assert_eq!(parse_numeric(text), None, "{text:?} must not parse");
+    }
+}
+
+// ——— Input plumbing ——————————————————————————————————————————————————————
 
 #[test]
 fn test_read_lines_file_inline_and_reader() {
