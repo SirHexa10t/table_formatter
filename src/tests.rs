@@ -370,7 +370,7 @@ fn sorting_by_out_of_range_column_is_a_clean_error() {
 #[test]
 fn sorting_empty_input_returns_empty() {
     // B1: this used to panic in `rows.remove(0)`
-    let out = format_table(&[], &options_with_sort(0)).unwrap();
+    let out = format_table::<String>(&[], &options_with_sort(0)).unwrap();
     assert!(out.is_empty());
 }
 
@@ -495,7 +495,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         self.0 >> 33
     }
     fn below(&mut self, n: usize) -> usize {
@@ -518,13 +521,13 @@ fn colorize_cells(lines: &[String], seed: u64) -> Vec<String> {
                 .map(|cell| {
                     let style = SGR_STYLES[rng.below(SGR_STYLES.len())];
                     match rng.below(3) {
-                        0 => cell, // leave as-is
+                        0 => cell.to_string(), // leave as-is
                         1 => format!("\u{1b}[{style}m{cell}\u{1b}[0m"), // whole cell
                         _ => {
                             // an inner span of characters
                             let chars: Vec<char> = cell.chars().collect();
                             if chars.is_empty() {
-                                return cell;
+                                return cell.to_string();
                             }
                             let start = rng.below(chars.len());
                             let end = start + 1 + rng.below(chars.len() - start);
@@ -557,7 +560,7 @@ fn coloring_cells_never_changes_layout() {
         let expected_sorted =
             strip_ansi_lines(&format_table(&plain, &options_with_sort(1)).unwrap());
 
-        for seed in [1, 42, 0xC0FFEE] {
+        for seed in [1, 42, 0x00C0_FFEE] {
             let colored = colorize_cells(&plain, seed + table_idx as u64);
 
             let got = strip_ansi_lines(&format_table(&colored, &FormatOptions::default()).unwrap());

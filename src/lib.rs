@@ -2,6 +2,7 @@ use clap::Parser;
 use ordered_float::OrderedFloat;
 use rayon::prelude::*;
 use regex::Regex;
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::fmt;
 use std::fs::File;
@@ -36,6 +37,7 @@ static NUMERIC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 /// Display width of `text` in terminal cells. ANSI escape sequences contribute nothing:
 /// `measure_text_width` parses them itself (the equivalence test in tests.rs pins this,
 /// including for malformed escapes — no pre-stripping needed).
+#[must_use]
 pub fn visible_len(text: &str) -> usize {
     // Printable ASCII is one cell per byte — no escapes, no wide glyphs. Worth a fast
     // path because width measurement runs twice per cell (column sizing + padding).
@@ -45,8 +47,19 @@ pub fn visible_len(text: &str) -> usize {
     console::measure_text_width(text)
 }
 
+/// ANSI-stripped view of `text`, skipping the escape parser entirely when no ESC byte
+/// is present — which is every cell of a plain table.
+fn ansi_stripped(text: &str) -> Cow<'_, str> {
+    if text.contains('\u{1b}') {
+        console::strip_ansi_codes(text)
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+#[must_use]
 pub fn is_numeric_or_neutral(text: &str) -> bool {
-    let clean = console::strip_ansi_codes(text);
+    let clean = ansi_stripped(text);
     let clean = clean.trim();
     matches!(clean, "" | "-" | "--" | "---" | "*" | "−" | "=" | "y" | "n" | "?")
         || NUMERIC_PATTERN.is_match(clean)
@@ -56,7 +69,7 @@ pub fn is_numeric_or_neutral(text: &str) -> bool {
 /// accepts — plain numbers, scaled ones (`3.5K`, `-1.2GiB/s`), percentages, frequencies,
 /// resolutions (`1080p`) — and `None` for anything else, neutral markers included.
 pub(crate) fn parse_numeric(text: &str) -> Option<f64> {
-    let clean = console::strip_ansi_codes(text);
+    let clean = ansi_stripped(text);
     let caps = NUMERIC_PATTERN.captures(clean.trim())?;
     let number: f64 = caps["num"].parse().ok()?;
 
@@ -67,7 +80,7 @@ pub(crate) fn parse_numeric(text: &str) -> Option<f64> {
         .map(|letter| letter.to_ascii_lowercase());
 
     let scale = match (scale_letter, binary) {
-        (None, _) | (Some('p'), _) => 1.0, // no scale, or pixels (1080p) — not peta
+        (None | Some('p'), _) => 1.0, // no scale, or pixels (1080p) — not peta
         (Some('k'), false) => 1e3,
         (Some('k'), true) => 1024.0,
         (Some('m'), false) => 1e6,
@@ -87,11 +100,17 @@ fn split_pattern(threshold: usize) -> Regex {
     Regex::new(&format!(r"\s{{{},}}|\t+", threshold.max(2))).unwrap()
 }
 
-fn split_row(line: &str, pattern: &Regex) -> Vec<String> {
-    pattern.split(line.trim()).map(String::from).collect()
+/// The default splitter, shared: repeated `format_table` calls at the default threshold
+/// skip the regex compilation, which dwarfs the actual work on small tables.
+static DEFAULT_SPLIT_PATTERN: LazyLock<Regex> = LazyLock::new(|| split_pattern(DEFAULT_THRESHOLD));
+
+/// Split a line into cells, borrowed straight from the input — cells are read-only
+/// views until output assembly, so no per-cell copies are made anywhere.
+fn split_row<'a>(line: &'a str, pattern: &Regex) -> Vec<&'a str> {
+    pattern.split(line.trim()).collect()
 }
 
-fn detect_column_properties(rows: &[Vec<String>]) -> (Vec<usize>, Vec<bool>) {
+fn detect_column_properties(rows: &[Vec<&str>]) -> (Vec<usize>, Vec<bool>) {
     let num_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
     let fresh = || (vec![0usize; num_cols], vec![true; num_cols]);
 
@@ -110,16 +129,20 @@ fn detect_column_properties(rows: &[Vec<String>]) -> (Vec<usize>, Vec<bool>) {
             }
             (widths, numeric)
         })
-        .reduce(fresh, |(widths_a, numeric_a), (widths_b, numeric_b)| {
-            (
-                widths_a.iter().zip(&widths_b).map(|(a, b)| *a.max(b)).collect(),
-                numeric_a.iter().zip(&numeric_b).map(|(a, b)| *a && *b).collect(),
-            )
+        .reduce(fresh, |(mut widths_a, mut numeric_a), (widths_b, numeric_b)| {
+            // Merge into the left operand — no fresh allocations per merge.
+            for (a, b) in widths_a.iter_mut().zip(&widths_b) {
+                *a = (*a).max(*b);
+            }
+            for (a, b) in numeric_a.iter_mut().zip(&numeric_b) {
+                *a = *a && *b;
+            }
+            (widths_a, numeric_a)
         })
 }
 
 fn format_row(
-    cells: &[String],
+    cells: &[&str],
     widths: &[usize],
     is_numeric: &[bool],
     spacer: &str,
@@ -129,8 +152,8 @@ fn format_row(
     let total = widths.iter().sum::<usize>() + spacer.len() * widths.len().saturating_sub(1);
     let mut out = String::with_capacity(total);
 
-    // Bind a single empty String for all "missing" cells
-    let empty = String::new();
+    // Bind a single empty cell for all "missing" cells
+    let empty = "";
 
     // Zip widths, flags, and cells (falling back to &empty). Padding goes by *visible*
     // width: `{:<width$}` would count chars, letting ANSI codes soak up the padding and
@@ -163,7 +186,7 @@ fn format_row(
 /// first), ascending for text. `header` decides whether row 0 is pinned on top:
 /// `Some` overrides, `None` auto-detects — the first row is treated as a header unless
 /// its sort cell parses as a number.
-fn sort_rows(rows: &mut [Vec<String>], idx: usize, numeric: bool, header: Option<bool>) {
+fn sort_rows(rows: &mut [Vec<&str>], idx: usize, numeric: bool, header: Option<bool>) {
     let first_is_header = header.unwrap_or_else(|| {
         rows.first()
             .and_then(|row| row.get(idx))
@@ -184,7 +207,7 @@ fn sort_rows(rows: &mut [Vec<String>], idx: usize, numeric: bool, header: Option
         // its escape bytes. Cached so the strip runs once per row, not per comparison.
         data.sort_by_cached_key(|row| {
             row.get(idx)
-                .map_or_else(String::new, |cell| console::strip_ansi_codes(cell).into_owned())
+                .map_or_else(String::new, |cell| ansi_stripped(cell).into_owned())
         });
     }
 }
@@ -240,15 +263,31 @@ impl Default for FormatOptions {
 }
 
 // ——— Core formatting functions ——————————————————————————————————
-pub fn format_table(lines: &[String], opts: &FormatOptions) -> Result<Vec<String>, FormatError> {
+/// Format `lines` into an aligned table (one output line per input line).
+/// Accepts any string-ish slice — `&[String]`, `&[&str]`, `&[Box<str>]`, …
+///
+/// # Errors
+/// Returns [`FormatError::SortColumnOutOfRange`] when `opts.sort` names a column
+/// the table doesn't have.
+#[must_use = "formatting allocates the whole table; ignoring it wastes the work"]
+pub fn format_table<S: AsRef<str> + Sync>(
+    lines: &[S],
+    opts: &FormatOptions,
+) -> Result<Vec<String>, FormatError> {
     if lines.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Split rows - always use par_iter, rayon will handle the parallelization decision
-    let pattern = split_pattern(opts.threshold);
-    let mut rows: Vec<Vec<String>> =
-        lines.par_iter().map(|line| split_row(line, &pattern)).collect();
+    // Split every line into its cells, in parallel — lines are independent.
+    let custom_pattern; // keeps a non-default splitter alive for the borrow below
+    let pattern = if opts.threshold <= DEFAULT_THRESHOLD {
+        &*DEFAULT_SPLIT_PATTERN
+    } else {
+        custom_pattern = split_pattern(opts.threshold);
+        &custom_pattern
+    };
+    let mut rows: Vec<Vec<&str>> =
+        lines.par_iter().map(|line| split_row(line.as_ref(), pattern)).collect();
     let (widths, is_numeric) = detect_column_properties(&rows);
 
     // sort, if asked to
@@ -267,7 +306,7 @@ pub fn format_table(lines: &[String], opts: &FormatOptions) -> Result<Vec<String
         .collect())
 }
 
-fn print_table(lines: &[String], opts: &FormatOptions) -> io::Result<()> {
+fn print_table<S: AsRef<str> + Sync>(lines: &[S], opts: &FormatOptions) -> io::Result<()> {
     let table = format_table(lines, opts)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
@@ -275,14 +314,15 @@ fn print_table(lines: &[String], opts: &FormatOptions) -> io::Result<()> {
     // stdout lock and issue a write syscall for every line.
     let mut out = BufWriter::new(io::stdout().lock());
     for line in &table {
-        writeln!(out, "{line}")?;
+        out.write_all(line.as_bytes())?;
+        out.write_all(b"\n")?;
     }
     out.flush()
 }
 
 // ——— CLI Options ——————————————————————————————————————
 #[derive(Parser)]
-#[command(author, version, about = "Align whitespace-delimited columns into a neat table")]
+#[command(version, about = "Align whitespace-delimited columns into a neat table")]
 pub struct Args {
     /// Input file path / data (or use stdin if not provided)
     #[arg(default_value = "-")]
@@ -333,6 +373,10 @@ impl Args {
 // ——— Library entry points ——————————————————————————————————————
 /// Run exactly as the `table_formatter` binary does, reading arguments from the
 /// process environment.
+///
+/// # Errors
+/// I/O errors from reading the input or writing stdout; an invalid `--sort`
+/// column surfaces as [`io::ErrorKind::InvalidInput`].
 pub fn run() -> io::Result<()> {
     run_from(std::env::args_os())
 }
@@ -340,6 +384,9 @@ pub fn run() -> io::Result<()> {
 /// Run with an explicit argument list (argv[0] should be the program name).
 /// This lets another program invoke `table_formatter` in-process, as if it had
 /// executed the binary with those arguments.
+///
+/// # Errors
+/// Same as [`run`].
 pub fn run_from<I, T>(args: I) -> io::Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -356,28 +403,52 @@ where
 ///
 /// The file-existence check means a one-line inline string is handled as data rather than
 /// mistaken for a path (which previously panicked in `File::open`).
+///
+/// # Errors
+/// Any I/O error from reading stdin or opening/reading the file.
 pub fn read_lines(input: &str) -> io::Result<Vec<String>> {
+    Ok(read_input(input)?.lines().map(String::from).collect())
+}
+
+/// Read a command's whole input as one string, routed exactly like [`read_lines`]:
+/// `"-"` / empty reads stdin, an existing file path reads that file, anything else is
+/// inline data. Callers can then borrow line slices instead of owning each line.
+fn read_input(input: &str) -> io::Result<String> {
     if input == "-" || input.is_empty() {
-        return read_from(io::stdin().lock());
+        return read_to_string_lossy(io::stdin().lock());
     }
     if Path::new(input).is_file() {
-        return read_from(File::open(input)?);
+        return read_to_string_lossy(File::open(input)?);
     }
-    Ok(input.lines().map(String::from).collect())
+    Ok(input.to_string())
+}
+
+/// Collect a reader's contents, decoding UTF-8 lossily so stray bytes don't abort.
+/// Valid UTF-8 converts in place — no second copy.
+fn read_to_string_lossy<R: Read>(mut reader: R) -> io::Result<String> {
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf)?;
+    Ok(String::from_utf8(buf)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned()))
 }
 
 /// Collect a reader's contents as lines, decoding UTF-8 lossily so stray bytes don't abort.
-pub(crate) fn read_from<R: Read>(mut reader: R) -> io::Result<Vec<String>> {
-    let mut buf = Vec::new();
-    reader.read_to_end(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).lines().map(String::from).collect())
+/// (Kept for the test suite's reader-path coverage; production goes through `read_input`.)
+#[cfg(test)]
+pub(crate) fn read_from<R: Read>(reader: R) -> io::Result<Vec<String>> {
+    Ok(read_to_string_lossy(reader)?.lines().map(String::from).collect())
 }
 
 /// Run with an already-parsed [`Args`]. This lets a dependent crate embed [`Args`]
 /// directly in its own clap CLI (e.g. as a `Subcommand` variant) and hand it
 /// straight here — so the argument definitions live only in this crate.
+///
+/// # Errors
+/// Same as [`run`].
 pub fn run_with(args: Args) -> io::Result<()> {
-    let lines = read_lines(&args.input)?;
+    // One buffer holds the whole input; rows borrow from it — no per-line copies.
+    let text = read_input(&args.input)?;
+    let lines: Vec<&str> = text.lines().collect();
     print_table(&lines, &args.format_options())
 }
 
