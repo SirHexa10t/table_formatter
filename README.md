@@ -4,7 +4,7 @@ A fast Rust CLI (and library) that aligns whitespace-delimited text into a neat 
 
 ## Features
 
-- **Align any whitespace-delimited input** — runs of 2+ spaces or any tabs count as column breaks, so multi-word cells with single spaces stay intact (tune with `--threshold`).
+- **Align any delimited input** — by default, runs of 2+ spaces or any tabs count as column breaks, so multi-word cells with single spaces stay intact. Point `--divide-by " | "` at pipe-delimited (or any other) data.
 - **Numbers line up right-aligned automatically** — a column counts as numeric even with units and scales: `3.5K`, `900M`, `2GiB/s`, `10%`, `60Hz`, `1080p` (`p` is pixels, not peta), plus neutral markers (`-`, `=`, `y`/`n`, empty).
 - **Sort by any column** with `--sort <idx>`: numeric columns descending (biggest first), text ascending. The header row is auto-detected and kept on top; override with `--header` / `--no-header`.
 - **ANSI-color transparent** — styled cells (`\x1b[32m…\x1b[0m`) never disturb layout, alignment, classification, or sort order; the escape codes just ride along. Emoji, CJK, and other wide glyphs align by their real terminal width.
@@ -63,25 +63,36 @@ backup.img  900M
 notes.txt     4K
 ```
 
-Reading a file and widening the column gap:
+Re-parsing pipe-delimited input and rendering it back with aligned pipes:
 
 ```sh
-$ table_formatter data.txt -s 4
-a    b    c
-1    2    3
+$ printf 'name | size\nlogs.tar | 1.2G\nnotes.txt | 4K\n' | table_formatter --divide-by ' | ' --join-with ' | '
+name      | size
+logs.tar  | 1.2G
+notes.txt |   4K
+```
+
+Round-tripping a Markdown-style table — the `| … |` frame is peeled on input and re-emitted with `--emit-frame`, so the result is stable if fed back in:
+
+```sh
+$ printf '| name | size |\n| logs.tar | 1.2G |\n| notes.txt | 4K |\n' | table_formatter -d ' | ' -j ' | ' --emit-frame
+| name      | size |
+| logs.tar  | 1.2G |
+| notes.txt |   4K |
 ```
 
 All options:
 
 | Flag | Effect |
 |---|---|
-| `-s, --separator <N>` | spaces between columns (default 2) |
-| `-t, --threshold <N>` | minimum run of spaces that splits a column (default 2, floored at 2) |
+| `-d, --divide-by <STR>` | column delimiter in the **input** (default `"  "`); must have leading + trailing whitespace, so `" \| "` is valid but `"\|"` is not. Whitespace around the core is flexible. |
+| `-j, --join-with <STR>` | string placed between columns in the **output** (default `"  "`); same whitespace requirement, so the result stays re-parseable. |
 | `--sort <IDX>` | sort by 0-based column; numeric descending, text ascending |
 | `--header` / `--no-header` | force the first row to be (or not be) a pinned header; default auto-detects |
 | `--remove-trailing-spaces` | trim the padding after the last column (disables table stitching) |
+| `--emit-frame` | wrap each output line in the `--join-with` edge characters, e.g. `\| … \|` for `--join-with " \| "` — emitting a framed (Markdown-style) table. Mutually exclusive with `--remove-trailing-spaces` (the frame needs that padding to stay aligned). |
 
-Errors are reported cleanly — e.g. `--sort 99` on a two-column table prints `table_formatter: sort column 99 is out of range: the table has 2 column(s)` to stderr and exits non-zero.
+Both delimiters require leading and trailing whitespace, and `--emit-frame` can't be combined with `--remove-trailing-spaces`. Errors are reported cleanly — e.g. `--join-with '|'` prints `table_formatter: --join-with "|" must have leading and trailing whitespace (e.g. " | ")` to stderr and exits non-zero.
 
 ### Library usage
 

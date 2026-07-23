@@ -13,8 +13,11 @@ use std::sync::LazyLock;
 
 
 // ——— Configuration ——————————————————————————————
-const DEFAULT_SEPARATOR: usize = 2;
-const DEFAULT_THRESHOLD: usize = 2;
+/// Column delimiters default to two spaces: the input splits on runs of 2+ whitespace,
+/// and the output puts two spaces between columns. Both must carry leading and trailing
+/// whitespace (see [`validate_delimiter`]), so the default is the tightest legal value.
+const DEFAULT_DIVIDE_BY: &str = "  ";
+const DEFAULT_JOIN_WITH: &str = "  ";
 
 // Regular expression patterns
 /// The numeric-cell grammar, shared by classification (`is_numeric_or_neutral`) and
@@ -94,20 +97,58 @@ pub(crate) fn parse_numeric(text: &str) -> Option<f64> {
     Some(number * scale)
 }
 
-/// Column-splitting regex for a given threshold: a run of `threshold`+ spaces (never fewer
-/// than 2, so multi-word cells stay intact) or any run of tabs.
-fn split_pattern(threshold: usize) -> Regex {
-    Regex::new(&format!(r"\s{{{},}}|\t+", threshold.max(2))).unwrap()
+/// Build the column-splitting regex for a `--divide-by` string. A whitespace-only
+/// delimiter (like the default `"  "`) splits on a run of that many-or-more whitespace
+/// characters, with single tabs always breaking too — the historical behavior, and the
+/// clean generalization of the old numeric threshold (`"   "` == old `-t 3`). A delimiter
+/// with a visible core (like `" | "`) splits on that core wherever it's flanked by at
+/// least one whitespace on each side, so `" | "`, `"  |  "`, and `"\t|\t"` all divide alike.
+///
+/// Assumes `divide_by` already passed [`validate_delimiter`] (≥1 leading + trailing ws).
+fn split_pattern(divide_by: &str) -> Regex {
+    let core = divide_by.trim();
+    let pattern = if core.is_empty() {
+        let run = divide_by.chars().count().max(2);
+        format!(r"\s{{{run},}}|\t+")
+    } else {
+        format!(r"\s+{}\s+", regex::escape(core))
+    };
+    Regex::new(&pattern).unwrap()
 }
 
-/// The default splitter, shared: repeated `format_table` calls at the default threshold
+/// The default splitter, shared: repeated `format_table` calls at the default delimiter
 /// skip the regex compilation, which dwarfs the actual work on small tables.
-static DEFAULT_SPLIT_PATTERN: LazyLock<Regex> = LazyLock::new(|| split_pattern(DEFAULT_THRESHOLD));
+static DEFAULT_SPLIT_PATTERN: LazyLock<Regex> = LazyLock::new(|| split_pattern(DEFAULT_DIVIDE_BY));
+
+/// Both delimiters must carry at least one leading and one trailing whitespace character,
+/// at distinct positions — so `" | "` and the default `"  "` are legal, but `"|"`, `"x"`,
+/// a lone `" "`, and `""` are not. On input this stops a single interior space from being
+/// read as a column break; on output it keeps the result re-parseable as a table.
+fn validate_delimiter(flag: &'static str, value: &str) -> Result<(), FormatError> {
+    let leading = value.chars().next().is_some_and(char::is_whitespace);
+    let trailing = value.chars().next_back().is_some_and(char::is_whitespace);
+    if value.chars().count() >= 2 && leading && trailing {
+        Ok(())
+    } else {
+        Err(FormatError::InvalidDelimiter { flag, value: value.to_string() })
+    }
+}
 
 /// Split a line into cells, borrowed straight from the input — cells are read-only
 /// views until output assembly, so no per-cell copies are made anywhere.
-fn split_row<'a>(line: &'a str, pattern: &Regex) -> Vec<&'a str> {
-    pattern.split(line.trim()).collect()
+///
+/// `border`, when set, is the (leading, trailing) half-divider of a delimiter that has a
+/// visible core — e.g. `("| ", " |")` for `" | "`. A line wrapped in that frame, like a
+/// Markdown-style row `| a | b |`, gets it peeled off first, so the frame's pipes don't
+/// fuse onto the first and last cells. A line without the frame is left untouched.
+fn split_row<'a>(line: &'a str, pattern: &Regex, border: Option<(&str, &str)>) -> Vec<&'a str> {
+    let mut trimmed = line.trim();
+    if let Some((lead, trail)) = border {
+        trimmed = trimmed.strip_prefix(lead).unwrap_or(trimmed);
+        trimmed = trimmed.strip_suffix(trail).unwrap_or(trimmed);
+        trimmed = trimmed.trim();
+    }
+    pattern.split(trimmed).collect()
 }
 
 fn detect_column_properties(rows: &[Vec<&str>]) -> (Vec<usize>, Vec<bool>) {
@@ -147,10 +188,16 @@ fn format_row(
     is_numeric: &[bool],
     spacer: &str,
     trim_trailing: bool,
+    frame: Option<(&str, &str)>,
 ) -> String {
+    let (lead, trail) = frame.unwrap_or(("", ""));
+
     // Pre-compute total capacity
-    let total = widths.iter().sum::<usize>() + spacer.len() * widths.len().saturating_sub(1);
+    let total = lead.len() + trail.len()
+        + widths.iter().sum::<usize>()
+        + spacer.len() * widths.len().saturating_sub(1);
     let mut out = String::with_capacity(total);
+    out.push_str(lead); // opening frame, if any — trims below only touch the tail
 
     // Bind a single empty cell for all "missing" cells
     let empty = "";
@@ -179,6 +226,7 @@ fn format_row(
     if trim_trailing {
         out.truncate(out.trim_end().len());
     }
+    out.push_str(trail); // closing frame, after any trailing trim
     out
 }
 
@@ -217,6 +265,12 @@ fn sort_rows(rows: &mut [Vec<&str>], idx: usize, numeric: bool, header: Option<b
 pub enum FormatError {
     /// `sort` asked for a column the table doesn't have.
     SortColumnOutOfRange { requested: usize, num_cols: usize },
+    /// A `--divide-by` / `--join-with` value lacked leading and trailing whitespace.
+    /// `flag` is the offending option name, for a message that points the user at the fix.
+    InvalidDelimiter { flag: &'static str, value: String },
+    /// Two options were set that can't work together — e.g. `--emit-frame` needs the
+    /// trailing padding that `--remove-trailing-spaces` strips, so the frame would go ragged.
+    ConflictingOptions { first: &'static str, second: &'static str },
 }
 
 impl fmt::Display for FormatError {
@@ -226,6 +280,13 @@ impl fmt::Display for FormatError {
                 f,
                 "sort column {requested} is out of range: the table has {num_cols} column(s)"
             ),
+            Self::InvalidDelimiter { flag, value } => write!(
+                f,
+                "{flag} {value:?} must have leading and trailing whitespace (e.g. \" | \")"
+            ),
+            Self::ConflictingOptions { first, second } => {
+                write!(f, "{first} cannot be combined with {second}")
+            }
         }
     }
 }
@@ -236,10 +297,13 @@ impl std::error::Error for FormatError {}
 /// How a table gets formatted; `..Default::default()` gives the CLI's defaults.
 #[derive(Debug, Clone)]
 pub struct FormatOptions {
-    /// Number of spaces between columns.
-    pub separator: usize,
-    /// Minimum run of spaces treated as a column break (floored at 2).
-    pub threshold: usize,
+    /// String that divides columns in the INPUT. Whitespace runs on each side are
+    /// flexible; a visible core (like `|`) divides only when whitespace-flanked. Must
+    /// contain leading and trailing whitespace (validated by [`format_table`]).
+    pub divide_by: String,
+    /// String placed between columns in the OUTPUT. Must contain leading and trailing
+    /// whitespace too, so the rendered table can be re-parsed as input.
+    pub join_with: String,
     /// Sort by this 0-based column: descending for numeric columns, ascending for text.
     pub sort: Option<usize>,
     /// `Some(true)`: the first row is a header and stays on top when sorting.
@@ -248,16 +312,21 @@ pub struct FormatOptions {
     pub header: Option<bool>,
     /// Strip the trailing padding spaces from each output line.
     pub trim_trailing: bool,
+    /// Wrap each output line in the `join_with` delimiter's edge characters, turning the
+    /// output into a framed (Markdown-style) table — `| … |` for `join_with = " | "`. A
+    /// whitespace-only `join_with` has no edge characters, so this is then a no-op.
+    pub emit_frame: bool,
 }
 
 impl Default for FormatOptions {
     fn default() -> Self {
         Self {
-            separator: DEFAULT_SEPARATOR,
-            threshold: DEFAULT_THRESHOLD,
+            divide_by: DEFAULT_DIVIDE_BY.to_string(),
+            join_with: DEFAULT_JOIN_WITH.to_string(),
             sort: None,
             header: None,
             trim_trailing: false,
+            emit_frame: false,
         }
     }
 }
@@ -267,27 +336,47 @@ impl Default for FormatOptions {
 /// Accepts any string-ish slice — `&[String]`, `&[&str]`, `&[Box<str>]`, …
 ///
 /// # Errors
-/// Returns [`FormatError::SortColumnOutOfRange`] when `opts.sort` names a column
-/// the table doesn't have.
+/// [`FormatError::SortColumnOutOfRange`] when `opts.sort` names a missing column,
+/// [`FormatError::InvalidDelimiter`] when `divide_by`/`join_with` lack leading and
+/// trailing whitespace, or [`FormatError::ConflictingOptions`] when `emit_frame` and
+/// `trim_trailing` are both set.
 #[must_use = "formatting allocates the whole table; ignoring it wastes the work"]
 pub fn format_table<S: AsRef<str> + Sync>(
     lines: &[S],
     opts: &FormatOptions,
 ) -> Result<Vec<String>, FormatError> {
+    // Reject bad option combinations up front — one guarantee for the library and the CLI.
+    validate_delimiter("--divide-by", &opts.divide_by)?;
+    validate_delimiter("--join-with", &opts.join_with)?;
+    // A frame needs the trailing padding to keep its right border aligned; stripping that
+    // padding would leave the frame ragged, so the two can't be combined.
+    if opts.emit_frame && opts.trim_trailing {
+        return Err(FormatError::ConflictingOptions {
+            first: "--emit-frame",
+            second: "--remove-trailing-spaces",
+        });
+    }
+
     if lines.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Split every line into its cells, in parallel — lines are independent.
+    // Split every line into its cells, in parallel — lines are independent. The default
+    // delimiter reuses the cached splitter; a custom one compiles its own.
     let custom_pattern; // keeps a non-default splitter alive for the borrow below
-    let pattern = if opts.threshold <= DEFAULT_THRESHOLD {
+    let pattern = if opts.divide_by == DEFAULT_DIVIDE_BY {
         &*DEFAULT_SPLIT_PATTERN
     } else {
-        custom_pattern = split_pattern(opts.threshold);
+        custom_pattern = split_pattern(&opts.divide_by);
         &custom_pattern
     };
+    // A delimiter with a visible core (`" | "`) frames Markdown-style rows as `| … |`;
+    // peel that outer frame so its pipes don't fuse onto the first and last cells. A
+    // whitespace-only delimiter has no such frame, so leave those rows exactly as they are.
+    let border = (!opts.divide_by.trim().is_empty())
+        .then(|| (opts.divide_by.trim_start(), opts.divide_by.trim_end()));
     let mut rows: Vec<Vec<&str>> =
-        lines.par_iter().map(|line| split_row(line.as_ref(), pattern)).collect();
+        lines.par_iter().map(|line| split_row(line.as_ref(), pattern, border)).collect();
     let (widths, is_numeric) = detect_column_properties(&rows);
 
     // sort, if asked to
@@ -298,11 +387,16 @@ pub fn format_table<S: AsRef<str> + Sync>(
         sort_rows(&mut rows, idx, is_numeric[idx], opts.header);
     }
 
+    // Optional output frame: re-add the join delimiter's edge halves around each line, so
+    // a table joined with `" | "` reads back as `| … |`. Mirror image of `border` above —
+    // and, with a matching `divide_by`, its exact inverse, so framed tables round-trip.
+    let frame = (opts.emit_frame && !opts.join_with.trim().is_empty())
+        .then(|| (opts.join_with.trim_start(), opts.join_with.trim_end()));
+
     // Format rows (the main feature; handle the spacing)
-    let spacer = " ".repeat(opts.separator);
     Ok(rows
         .par_iter()
-        .map(|row| format_row(row, &widths, &is_numeric, &spacer, opts.trim_trailing))
+        .map(|row| format_row(row, &widths, &is_numeric, &opts.join_with, opts.trim_trailing, frame))
         .collect())
 }
 
@@ -328,14 +422,15 @@ pub struct Args {
     #[arg(default_value = "-")]
     input: String,
 
-    /// Number of spaces to separate columns
-    #[arg(short, long, default_value_t = DEFAULT_SEPARATOR)]
-    separator: usize,
+    /// String that divides columns in the input; needs leading + trailing whitespace, so
+    /// " | " is a valid pipe delimiter but "|" is not. Whitespace runs are flexible.
+    #[arg(short = 'd', long, default_value = DEFAULT_DIVIDE_BY)]
+    divide_by: String,
 
-    /// Minimum run of spaces treated as a column break (tabs always break); floored at 2, so
-    /// a value with a couple of interior spaces stays in one cell.
-    #[arg(short, long, default_value_t = DEFAULT_THRESHOLD)]
-    threshold: usize,
+    /// String placed between columns in the output; needs leading + trailing whitespace
+    /// too (so the result stays re-parseable), e.g. " | ".
+    #[arg(short = 'j', long, default_value = DEFAULT_JOIN_WITH)]
+    join_with: String,
 
     /// Sort by column index (0-based): numeric columns descending, text ascending.
     #[arg(long)]
@@ -352,13 +447,18 @@ pub struct Args {
     /// Strip trailing padding spaces from output lines
     #[arg(long)]
     remove_trailing_spaces: bool,
+
+    /// Wrap each output line in the --join-with edge characters, e.g. "| … |" for
+    /// --join-with " | " — emitting a framed (Markdown-style) table
+    #[arg(long)]
+    emit_frame: bool,
 }
 
 impl Args {
     fn format_options(&self) -> FormatOptions {
         FormatOptions {
-            separator: self.separator,
-            threshold: self.threshold,
+            divide_by: self.divide_by.clone(),
+            join_with: self.join_with.clone(),
             sort: self.sort,
             header: match (self.header, self.no_header) {
                 (true, _) => Some(true),
@@ -366,6 +466,7 @@ impl Args {
                 _ => None,
             },
             trim_trailing: self.remove_trailing_spaces,
+            emit_frame: self.emit_frame,
         }
     }
 }

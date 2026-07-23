@@ -1,0 +1,19 @@
+| Voice / genre (correct term) | Mode | Typical note range | [1;33mFundamental (Hz)[0m | Notable |
+| --- | --- | --- | --- | --- |
+| [1;33mDeath growl — "Batman sings death metal"[0m (guttural) | 🎤 | ~C1–C3, indeterminate | [1;33m~50–150 Hz[0m (sounds lower via subharmonics) | False-fold vibration; noise-dominated, not cleanly pitched |
+| [1;33mBasso profondo / oktavist[0m (Russian Orthodox) | 🎤 | A1–E4; extremes to C1 | [1;33m~55–330 Hz[0m; down to [1;33m33 Hz[0m | Lowest [3;95mtrue pitched[0m singing on Earth |
+| [1;33mVocal fry / "Batman" gravel[0m (creak register) | 🗣 | sub-bass creak | [1;33m~20–50 Hz[0m | Irregular pulses; the gritty/authoritative rasp |
+| [1;33mDeep male / radio-announcer speech[0m | 🗣 | E2–A2 | [1;33m~82–110 Hz[0m | Bottom of everyday male speech |
+| [1;33mAverage adult male speech[0m | 🗣 | F2–F3 | [1;33m~85–180 Hz[0m (avg ~115) | Conversational baseline |
+| [1;33mMale pop / rock / country / crooner[0m | 🎤 | A2–C5 | [1;33m~110–523 Hz[0m | Baritone–tenor belt |
+| [1;33mRap / hip-hop[0m | 🗣🎤 | F2–F3 | [1;33m~85–180 Hz[0m | [3;95mSpeech[0m pitch, [3;95mmusical[0m rhythm |
+| [1;33mGregorian chant (Latin plainsong)[0m | 🎤 | C3–D4, ≤ octave | [1;33m~131–294 Hz[0m | Narrow; pitch is relative (a cappella) |
+| [1;33mAverage adult female speech[0m | 🗣 | E3–C4 | [1;33m~165–255 Hz[0m (avg ~200) | ~1.7× higher than male, from puberty |
+| [1;33mYoung child speech (kindergarten, 4–6)[0m | 🗣 | ~A3–B3 centre | [1;33m~220–255 Hz[0m avg (spread ~135–300) | Boys ≈ girls — sexes split only at age ~7–9 |
+| [1;33mFemale pop / R&B / soul[0m | 🎤 | G3–E5 | [1;33m~196–659 Hz[0m | Belts to E5+ |
+| [1;33mK-pop / J-pop (idol)[0m | 🎤 | A3–E5 | [1;33m~220–659 Hz[0m | Very bright; boosted "air" 8–16 kHz |
+| [1;33mChildren's choir ("little girl at kindergarten")[0m | 🎤 | preschool C4–A4; trained to G5 | [1;33m~262–440 Hz[0m (→ [1;33m784 Hz[0m) | Comfortable core E4–G4; narrow ~a fifth when young |
+| [1;33mMusical-theatre / gospel belt (female)[0m | 🎤 | up to E5–F5 | up to [1;33m~659–698 Hz[0m | High chest-mix belt |
+| [1;33mProjected / podium / stage speech[0m | 🗣 | speech F0 (as above) | [1;33mspeaker's/actor's formant ~3–3.7 kHz[0m | Same pitch, added "ring" so it carries unamplified |
+| [1;33mOpera — soprano / [0m[1;33mcoloratura[0m | 🎤 | C4–F6 | [1;33m~262–1,397 Hz[0m | [1;33msinger's formant 2.5–3.5 kHz[0m to cut over the orchestra |
+| [1;33mWhistle register (Mariah, Minnie Riperton)[0m | 🎤 | E6–G♯7 | [1;33m~1,319–3,322 Hz[0m | Only the rear vocal-fold edges vibrate; <5% of singers |

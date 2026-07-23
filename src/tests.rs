@@ -172,32 +172,230 @@ fn format_sorted(input: &[&str], col: usize) -> Vec<String> {
 }
 
 #[test]
-fn threshold_widens_what_counts_as_a_column_break() {
-    let input = to_strings(&["a  b"]); // one run of two spaces
-    // default threshold (2): the two spaces are a column break, re-spaced to the separator
-    let wide = FormatOptions { separator: 4, ..Default::default() };
-    assert_eq!(format_table(&input, &wide).unwrap(), to_strings(&["a    b"]));
-    // threshold 3: two spaces fall below the break, so it stays one cell (unchanged)
-    let strict = FormatOptions { separator: 4, threshold: 3, ..Default::default() };
-    assert_eq!(format_table(&input, &strict).unwrap(), to_strings(&["a  b"]));
+fn join_with_sets_the_output_gap() {
+    // two-space input splits into two columns; the join string is the between-column gap
+    let input = to_strings(&["a  b"]);
+    let opts = FormatOptions { join_with: "    ".to_string(), ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["a    b"]));
 }
 
 #[test]
-fn threshold_below_two_is_floored_to_two() {
-    // a single interior space must never split a cell, even when threshold is 0 or 1
+fn wider_whitespace_divider_keeps_smaller_gaps_together() {
+    // "   " (3 spaces) divides only on 3+ whitespace, so a 2-space gap stays one cell
+    // — the string-delimiter form of the old `--threshold 3`.
+    let input = to_strings(&["a  b"]);
+    let opts = FormatOptions { divide_by: "   ".to_string(), ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["a  b"]));
+}
+
+#[test]
+fn single_space_divider_is_rejected_and_default_keeps_multiword_cells() {
     let input = to_strings(&["one two  three"]);
-    let expected = format_table(&input, &FormatOptions::default()).unwrap();
-    for threshold in [0, 1] {
-        let opts = FormatOptions { threshold, ..Default::default() };
-        assert_eq!(format_table(&input, &opts).unwrap(), expected);
+    // you can't ask for a single-space column break — it's an invalid delimiter
+    let opts = FormatOptions { divide_by: " ".to_string(), ..Default::default() };
+    assert_eq!(
+        format_table(&input, &opts).unwrap_err(),
+        FormatError::InvalidDelimiter { flag: "--divide-by", value: " ".to_string() }
+    );
+    // and by default, single interior spaces stay glued (only the 2-space run splits)
+    assert_eq!(
+        format_table(&input, &FormatOptions::default()).unwrap(),
+        to_strings(&["one two  three"])
+    );
+}
+
+#[test]
+fn delimiters_without_surrounding_whitespace_are_rejected() {
+    let input = to_strings(&["aa  b", "c  dd"]);
+    for bad in ["", "|", " ", "x", "a|b"] {
+        let join = FormatOptions { join_with: bad.to_string(), ..Default::default() };
+        assert_eq!(
+            format_table(&input, &join).unwrap_err(),
+            FormatError::InvalidDelimiter { flag: "--join-with", value: bad.to_string() }
+        );
+        let divide = FormatOptions { divide_by: bad.to_string(), ..Default::default() };
+        assert_eq!(
+            format_table(&input, &divide).unwrap_err(),
+            FormatError::InvalidDelimiter { flag: "--divide-by", value: bad.to_string() }
+        );
+    }
+    // the error message names the flag and shows the offending value + a fix
+    let err = FormatError::InvalidDelimiter { flag: "--join-with", value: "|".to_string() };
+    assert_eq!(err.to_string(), "--join-with \"|\" must have leading and trailing whitespace (e.g. \" | \")");
+}
+
+// ——— Custom delimiters (--divide-by / --join-with) ————————————————————————
+
+#[test]
+fn divide_by_pipe_splits_pipe_delimited_input() {
+    // " | " divides input into columns; output re-joins with the default "  "
+    let input = to_strings(&["ab | cd", "ef | gh"]);
+    let opts = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["ab  cd", "ef  gh"]));
+}
+
+#[test]
+fn divide_by_matches_whitespace_flexibly_around_the_core() {
+    // one space, several spaces, or a tab around the pipe all divide identically
+    let opts = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    for line in ["x | y", "x  |  y", "x\t|\ty", "x   |\ty"] {
+        assert_eq!(
+            format_table(&to_strings(&[line]), &opts).unwrap(),
+            to_strings(&["x  y"]),
+            "{line:?} should divide into [x, y]"
+        );
     }
 }
 
 #[test]
-fn separator_zero_packs_columns_together() {
-    let input = to_strings(&["aa  b", "c  dd"]);
-    let opts = FormatOptions { separator: 0, ..Default::default() };
-    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["aab ", "c dd"]));
+fn join_with_renders_a_visible_delimiter() {
+    // default 2-space input, joined for display with " | " (padding still aligns columns)
+    let input = to_strings(&["ab  cd", "ef  gh"]);
+    let opts = FormatOptions { join_with: " | ".to_string(), ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["ab | cd", "ef | gh"]));
+}
+
+#[test]
+fn matching_divide_and_join_round_trips() {
+    // dividing and joining on the same " | " makes formatting idempotent: a messy table
+    // organizes once, then re-formats to itself — the stitching guarantee, for pipes.
+    let opts = FormatOptions {
+        divide_by: " | ".to_string(),
+        join_with: " | ".to_string(),
+        ..Default::default()
+    };
+    let messy = to_strings(&["a | bbbb", "cccc | d"]);
+    let organized = format_table(&messy, &opts).unwrap();
+    assert_eq!(organized, to_strings(&["a    | bbbb", "cccc | d   "]));
+    // second pass is a no-op
+    assert_eq!(format_table(&organized, &opts).unwrap(), organized);
+}
+
+#[test]
+fn bordered_pipe_table_divides_joins_and_round_trips() {
+    // testing/freq_tables.txt is a Markdown-style table: every row is framed as `| … |`,
+    // with ANSI color inside cells. Dividing on " | " must peel that outer frame instead
+    // of fusing it onto the edge cells.
+    let raw = read_lines("testing/freq_tables.txt").unwrap();
+
+    let divide = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    let rejoin = FormatOptions { join_with: " | ".to_string(), ..Default::default() };
+    let both = FormatOptions {
+        divide_by: " | ".to_string(),
+        join_with: " | ".to_string(),
+        ..Default::default()
+    };
+
+    // Pipeline A: divide " | " (default join), then on that output join " | " (default divide).
+    let a1 = format_table(&raw, &divide).unwrap();
+    let a2 = format_table(&a1, &rejoin).unwrap();
+    // Pipeline B: divide and join " | " in a single pass.
+    let b = format_table(&raw, &both).unwrap();
+
+    // The two pipelines must agree, line for line.
+    assert_eq!(a2, b, "two-pass and one-pass results must match");
+    assert_eq!(b.len(), raw.len(), "one output line per input line");
+
+    // The frame is consumed, not carried as content: no cell begins or ends with a pipe.
+    for line in &b {
+        assert!(!line.starts_with('|'), "leading frame leaked into column 0: {line:?}");
+        assert!(!line.trim_end().ends_with('|'), "trailing frame leaked into last column: {line:?}");
+    }
+
+    // ANSI content survives the round trip (the colored cells are still colored).
+    assert!(b.iter().any(|line| line.contains('\u{1b}')), "styling was lost");
+}
+
+#[test]
+fn divide_by_pipe_strips_the_markdown_frame() {
+    // a lone framed row divides into exactly its inner cells — no empty edges, no stuck pipes
+    let opts = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    assert_eq!(
+        format_table(&to_strings(&["| a | bb | c |"]), &opts).unwrap(),
+        to_strings(&["a  bb  c"])
+    );
+    // a frame is optional per line: an unframed row divides the same way
+    assert_eq!(
+        format_table(&to_strings(&["a | bb | c"]), &opts).unwrap(),
+        to_strings(&["a  bb  c"])
+    );
+}
+
+#[test]
+fn emit_frame_wraps_lines_in_the_join_delimiter_edges() {
+    // joining with " | " and framing turns "a | b" into "| a | b |"
+    let input = to_strings(&["ab  cd", "ef  gh"]);
+    let opts = FormatOptions {
+        join_with: " | ".to_string(),
+        emit_frame: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        format_table(&input, &opts).unwrap(),
+        to_strings(&["| ab | cd |", "| ef | gh |"])
+    );
+}
+
+#[test]
+fn emit_frame_is_a_noop_without_a_join_core() {
+    // the default join is whitespace-only, so it has no edge characters to add
+    let input = to_strings(&["a  b", "c  d"]);
+    let opts = FormatOptions { emit_frame: true, ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["a  b", "c  d"]));
+}
+
+#[test]
+fn framed_markdown_table_round_trips_through_matching_divide_join() {
+    // peel the frame on input, re-emit it on output: a Markdown table organizes once,
+    // then re-formats to itself. `--emit-frame` is the exact inverse of frame-peeling.
+    let opts = FormatOptions {
+        divide_by: " | ".to_string(),
+        join_with: " | ".to_string(),
+        emit_frame: true,
+        ..Default::default()
+    };
+    let messy = to_strings(&["| a | bbbb |", "| cccc | d |"]);
+    let organized = format_table(&messy, &opts).unwrap();
+    assert_eq!(organized, to_strings(&["| a    | bbbb |", "| cccc | d    |"]));
+    // and it's stable: a second pass is a no-op
+    assert_eq!(format_table(&organized, &opts).unwrap(), organized);
+}
+
+#[test]
+fn emit_frame_and_trim_trailing_are_mutually_exclusive() {
+    // the frame needs the trailing padding to stay aligned, so the combination is refused
+    let input = to_strings(&["ab  cd", "ef  gh"]);
+    let opts = FormatOptions {
+        join_with: " | ".to_string(),
+        emit_frame: true,
+        trim_trailing: true,
+        ..Default::default()
+    };
+    let err = format_table(&input, &opts).unwrap_err();
+    assert_eq!(
+        err,
+        FormatError::ConflictingOptions {
+            first: "--emit-frame",
+            second: "--remove-trailing-spaces",
+        }
+    );
+    assert_eq!(err.to_string(), "--emit-frame cannot be combined with --remove-trailing-spaces");
+
+    // via the CLI, the conflict surfaces as a clean InvalidInput error, not a panic
+    let cli = run_from([
+        "table_formatter", "a  b", "--emit-frame", "--remove-trailing-spaces",
+    ])
+    .unwrap_err();
+    assert_eq!(cli.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(cli.to_string().contains("cannot be combined with"));
+}
+
+#[test]
+fn run_from_reports_invalid_delimiter_as_clean_io_error() {
+    // the CLI path wraps the delimiter FormatError as InvalidInput instead of panicking
+    let err = run_from(["table_formatter", "a  b", "--join-with", "|"]).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("leading and trailing whitespace"));
 }
 
 // Exercise the CLI's input handling + formatting in-process: read the input exactly as the
@@ -512,11 +710,11 @@ const SGR_STYLES: &[&str] = &["31", "32", "33", "34", "1", "4", "38;5;208"];
 /// ANSI style codes. Cell separators stay untouched, so the table's cells are identical.
 fn colorize_cells(lines: &[String], seed: u64) -> Vec<String> {
     let mut rng = Lcg(seed);
-    let pattern = split_pattern(2);
+    let pattern = split_pattern("  ");
     lines
         .iter()
         .map(|line| {
-            let cells: Vec<String> = split_row(line, &pattern)
+            let cells: Vec<String> = split_row(line, &pattern, None)
                 .into_iter()
                 .map(|cell| {
                     let style = SGR_STYLES[rng.below(SGR_STYLES.len())];
