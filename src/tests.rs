@@ -123,14 +123,15 @@ const MISSING_LINES: &[&str] = &[
     "8      X",
 ];
 
+// Blank lines are records with no data, so they surface the `-` no-data filler.
 const MISSING_LINES_ORGANIZED: &[&str] = &[
     "A  B",
     "1  X",
     "2  X",
     "3  X",
-    "    ",
+    "-   ",
     "5  X",
-    "    ",
+    "-   ",
     "7  X",
     "7  X",
     "8  X",
@@ -224,6 +225,81 @@ fn delimiters_without_surrounding_whitespace_are_rejected() {
     assert_eq!(err.to_string(), "--join-with \"|\" must have leading and trailing whitespace (e.g. \" | \")");
 }
 
+// ——— No-data cells get a filler (base layer; fold relies on it) ————————————
+
+#[test]
+fn empty_cells_are_filled_with_the_no_data_marker() {
+    // ` | | ` yields an empty middle cell — it comes out as `-`, keeping its column.
+    // (`-` and `y` are neutral, so those all-neutral data columns right-align.)
+    let input = to_strings(&["a | one | x", "b |  | y"]);
+    let opts = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["a  one  x", "b    -  y"]));
+}
+
+#[test]
+fn filler_falls_back_when_the_delimiter_contains_a_dash() {
+    // with ` - ` as the delimiter, a `-` filler would read as another delimiter, so `×`
+    // steps in (and `×` is neutral, so numeric columns keep their alignment)
+    let input = to_strings(&["a - one - x", "b -  - y"]);
+    let opts = FormatOptions { divide_by: " - ".to_string(), ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["a  one  x", "b    ×  y"]));
+    assert!(is_numeric_or_neutral("×"), "the fallback filler must be neutral");
+}
+
+#[test]
+fn a_colored_but_empty_cell_is_still_filled() {
+    // a cell of pure ANSI codes has no visible data; styling must not dodge the filler
+    let input = to_strings(&["a | one | x", "b | \u{1b}[32m\u{1b}[0m | y"]);
+    let opts = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    let out = format_table(&input, &opts).unwrap();
+    assert_eq!(
+        strip_ansi_lines(&out),
+        to_strings(&["a  one  x", "b    -  y"]),
+        "an all-ANSI cell must fill exactly like a plain empty one"
+    );
+}
+
+#[test]
+fn heroes_fixture_preserves_all_cells_and_stays_stable() {
+    // real pipe-delimited table with an often-empty Shots column: after formatting, every
+    // record still has all 11 columns (empties became `-`), and a second pass is a no-op
+    let raw = read_lines("testing/table_w_empty_cells.txt").unwrap();
+    let opts = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    let out = format_table(&raw, &opts).unwrap();
+    assert_eq!(out.len(), raw.len());
+
+    let sep = split_pattern("  ");
+    for line in &out {
+        let cells: Vec<&str> = sep.split(line.trim()).collect();
+        assert_eq!(cells.len(), 11, "column lost in {line:?}");
+        assert!(cells.iter().all(|c| !c.trim().is_empty()), "empty cell survived in {line:?}");
+    }
+
+    // idempotent: the organized output re-formats to itself (with the default divider now,
+    // since the pipes were consumed on the first pass)
+    let second = format_table(&out, &FormatOptions::default()).unwrap();
+    assert_eq!(second, out);
+}
+
+#[test]
+fn heroes_fixture_folds_and_unfolds_preserving_content() {
+    // the filled cells ride through fold → unfold like any data
+    let raw = read_lines("testing/table_w_empty_cells.txt").unwrap();
+    let base = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    let wide = format_table(&raw, &base).unwrap();
+
+    let folded = format_table(
+        &raw,
+        &FormatOptions { fold_row_width: Some(80), ..base.clone() },
+    )
+    .unwrap();
+    for line in &folded {
+        assert!(visible_len(line) <= 80, "{line:?} is {} cols", visible_len(line));
+    }
+    let restored = format_table(&folded, &FormatOptions { unfold: true, ..Default::default() }).unwrap();
+    assert_eq!(restored, wide);
+}
+
 // ——— Custom delimiters (--divide-by / --join-with) ————————————————————————
 
 #[test]
@@ -273,10 +349,10 @@ fn matching_divide_and_join_round_trips() {
 
 #[test]
 fn bordered_pipe_table_divides_joins_and_round_trips() {
-    // testing/freq_tables.txt is a Markdown-style table: every row is framed as `| … |`,
+    // testing/freq_table.txt is a Markdown-style table: every row is framed as `| … |`,
     // with ANSI color inside cells. Dividing on " | " must peel that outer frame instead
     // of fusing it onto the edge cells.
-    let raw = read_lines("testing/freq_tables.txt").unwrap();
+    let raw = read_lines("testing/freq_table.txt").unwrap();
 
     let divide = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
     let rejoin = FormatOptions { join_with: " | ".to_string(), ..Default::default() };

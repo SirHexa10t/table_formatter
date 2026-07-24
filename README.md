@@ -5,6 +5,7 @@ A fast Rust CLI (and library) that aligns whitespace-delimited text into a neat 
 ## Features
 
 - **Align any delimited input** — by default, runs of 2+ spaces or any tabs count as column breaks, so multi-word cells with single spaces stay intact. Point `--divide-by " | "` at pipe-delimited (or any other) data.
+- **Empty cells are preserved, not lost** — a cell with no data (e.g. ` \| \| ` in pipe-delimited input, or a blank line) is filled with `-` so it keeps its column through re-splitting and sorting; if `-` appears in your delimiter, `×` is used instead. Both are neutral, so numeric columns keep their alignment.
 - **Numbers line up right-aligned automatically** — a column counts as numeric even with units and scales: `3.5K`, `900M`, `2GiB/s`, `10%`, `60Hz`, `1080p` (`p` is pixels, not peta), plus neutral markers (`-`, `=`, `y`/`n`, empty).
 - **Sort by any column** with `--sort <idx>`: numeric columns descending (biggest first), text ascending. The header row is auto-detected and kept on top; override with `--header` / `--no-header`.
 - **ANSI-color transparent** — styled cells (`\x1b[32m…\x1b[0m`) never disturb layout, alignment, classification, or sort order; the escape codes just ride along. Emoji, CJK, and other wide glyphs align by their real terminal width.
@@ -91,8 +92,23 @@ All options:
 | `--header` / `--no-header` | force the first row to be (or not be) a pinned header; default auto-detects |
 | `--remove-trailing-spaces` | trim the padding after the last column (disables table stitching) |
 | `--emit-frame` | wrap each output line in the `--join-with` edge characters, e.g. `\| … \|` for `--join-with " \| "` — emitting a framed (Markdown-style) table. Mutually exclusive with `--remove-trailing-spaces` (the frame needs that padding to stay aligned). |
+| `--fold-row-width <N>` | wrap the table to at most `N` visible columns per line: cells word-wrap within per-column widths (chosen to add the fewest extra lines, keeping words whole) and stack, keeping columns aligned. Continuation lines carry a `·` marker in a one-column left gutter; a word that must be split mid-way gets a `‐` (U+2010) so the break is lossless. `N` must be at least 2 and at least the `--join-with` width. Mutually exclusive with `--emit-frame`. |
+| `--unfold` | reverse `--fold-row-width`: collapse a wrapped table back to one line per record (recover columns, drop placeholders, rejoin fragments). Use the same `-d`/`-j`/`--sentinel` you folded with. |
+| `--sentinel <CHAR>` | the marker character for the fold gutter and empty-cell placeholders (default `·`). Must be non-whitespace; pass the **same** one to `--fold-row-width` and `--unfold` or the round trip won't recognize it. |
 
-Both delimiters require leading and trailing whitespace, and `--emit-frame` can't be combined with `--remove-trailing-spaces`. Errors are reported cleanly — e.g. `--join-with '|'` prints `table_formatter: --join-with "|" must have leading and trailing whitespace (e.g. " | ")` to stderr and exits non-zero.
+Both delimiters require leading and trailing whitespace, and `--emit-frame` can't be combined with `--remove-trailing-spaces` or `--fold-row-width`. Errors are reported cleanly — e.g. `--join-with '|'` prints `table_formatter: --join-with "|" must have leading and trailing whitespace (e.g. " | ")` to stderr and exits non-zero.
+
+`--fold-row-width` keeps a too-wide table readable on a narrow terminal by wrapping each cell inside its column instead of letting lines run off the edge. Continuation lines are marked with `·` in the gutter, and empty column slots on those lines get a `·` placeholder (trailing padding trimmed here for readability):
+
+```
+$ printf 'name  detail  qty\nfoo  a fairly long note that will not run off a narrow terminal  3\nbar  short  7\n' | table_formatter --fold-row-width 60
+ name  detail                                            qty
+ foo   a fairly long note that will not run off a          3
+··     narrow terminal                                     ·
+ bar   short                                               7
+```
+
+`--unfold` reverses it — `… | table_formatter --fold-row-width 60 | table_formatter --unfold` returns the un-wrapped table. The round trip is exact for word-wrapped content; whitespace at wrap points is normalized to single spaces, and blank/all-empty rows are not preserved exactly.
 
 ### Library usage
 
