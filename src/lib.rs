@@ -11,7 +11,7 @@ use std::iter::{repeat, repeat_n};
 use std::path::Path;
 use std::sync::LazyLock;
 
-mod fold;
+mod split;
 
 
 // ——— Configuration ——————————————————————————————
@@ -20,6 +20,9 @@ mod fold;
 /// whitespace (see [`validate_delimiter`]), so the default is the tightest legal value.
 const DEFAULT_DIVIDE_BY: &str = "  ";
 const DEFAULT_JOIN_WITH: &str = "  ";
+/// `--split-lines`'s width when neither `$COLUMNS` nor a tty can say better: the
+/// traditional terminal width.
+pub(crate) const FALLBACK_TERMINAL_WIDTH: usize = 80;
 
 // ——— Special characters ——————————————————————————————
 // The tool's marker vocabulary, kept together so no two roles collide by accident.
@@ -31,11 +34,11 @@ pub(crate) const EMPTY_CELL_FILLER: &str = "-";
 /// Fallback filler when `-` appears in a delimiter (a `-` cell would then read as part of
 /// the delimiter). `×` (U+00D7) is also in the neutral set.
 pub(crate) const EMPTY_CELL_FILLER_FALLBACK: &str = "×";
-/// Fold gutter + empty-slot placeholder marker (default; `--sentinel` overrides): a middle
+/// Split gutter + empty-slot placeholder marker (default; `--sentinel` overrides): a middle
 /// dot — low ink, rarely typed in data.
 pub(crate) const DEFAULT_SENTINEL: char = '\u{b7}'; // ·
-/// Fold mid-word break marker: a typographic hyphen — looks like `-` but is virtually
-/// never typed (people type U+002D), so unfold can trust it marks a break, not data.
+/// Split mid-word break marker: a typographic hyphen — looks like `-` but is virtually
+/// never typed (people type U+002D), so unsplit can trust it marks a break, not data.
 pub(crate) const BREAK_HYPHEN: char = '\u{2010}'; // ‐
 
 // Regular expression patterns
@@ -116,33 +119,59 @@ pub(crate) fn parse_numeric(text: &str) -> Option<f64> {
     Some(number * scale)
 }
 
-/// Build the column-splitting regex for a `--divide-by` string. A whitespace-only
-/// delimiter (like the default `"  "`) splits on a run of that many-or-more whitespace
-/// characters, with single tabs always breaking too — the historical behavior, and the
-/// clean generalization of the old numeric threshold (`"   "` == old `-t 3`). A delimiter
-/// with a visible core (like `" | "`) splits on that core wherever it's flanked by at
-/// least one whitespace on each side, so `" | "`, `"  |  "`, and `"\t|\t"` all divide alike.
+/// Splits text into end-trimmed cells for one delimiter — the single splitting mechanic,
+/// shared by formatting and by `unsplit`.
 ///
-/// The cored form consumes only ONE trailing whitespace: adjacent delimiters around an
-/// empty cell (`x |  | y`) must each find a leading whitespace of their own, which a
-/// greedy `\s+` tail would have swallowed. Leftover whitespace lands in the next cell and
-/// is removed by the per-cell trim in [`split_row`].
-///
-/// Assumes `divide_by` already passed [`validate_delimiter`] (≥1 leading + trailing ws).
-fn split_pattern(divide_by: &str) -> Regex {
-    let core = divide_by.trim();
-    let pattern = if core.is_empty() {
-        let run = divide_by.chars().count().max(2);
-        format!(r"\s{{{run},}}|\t+")
-    } else {
-        format!(r"\s+{}\s", regex::escape(core))
-    };
-    Regex::new(&pattern).unwrap()
+/// A whitespace-only delimiter (like the default `"  "`) splits on a run of that
+/// many-or-more whitespace characters, with single tabs always breaking too — the
+/// historical behavior, and the clean generalization of the old numeric threshold
+/// (`"   "` == old `-t 3`). A delimiter with a visible core (like `" | "`) splits on that
+/// core wherever it has whitespace on both sides — and the trailing whitespace is
+/// *required but not consumed*, so two adjacent delimiters can share one flank:
+/// `a | | b` divides into `[a, "", b]`.
+pub(crate) struct Divider {
+    pattern: Regex,
+    cored: bool,
+}
+
+impl Divider {
+    /// Assumes `divide_by` already passed [`validate_delimiter`] (≥1 leading + trailing ws).
+    pub(crate) fn new(divide_by: &str) -> Self {
+        let core = divide_by.trim();
+        let (pattern, cored) = if core.is_empty() {
+            let run = divide_by.chars().count().max(2);
+            (format!(r"\s{{{run},}}|\t+"), false)
+        } else {
+            (format!(r"\s+{}", regex::escape(core)), true)
+        };
+        Divider { pattern: Regex::new(&pattern).unwrap(), cored }
+    }
+
+    /// The cells of `text`, each end-trimmed.
+    pub(crate) fn split<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        if !self.cored {
+            return self.pattern.split(text).map(str::trim).collect();
+        }
+        // A cored match (`\s+core`) counts as a delimiter only when whitespace follows it.
+        // That whitespace stays put, ready to serve as the *leading* flank of an adjacent
+        // delimiter; a match glued to data (`foo |bar`) is content and stays in its cell.
+        let mut cells = Vec::new();
+        let mut start = 0;
+        for m in self.pattern.find_iter(text) {
+            let followed_by_ws = text[m.end()..].starts_with(|ch: char| ch.is_whitespace());
+            if followed_by_ws {
+                cells.push(text[start..m.start()].trim());
+                start = m.end();
+            }
+        }
+        cells.push(text[start..].trim());
+        cells
+    }
 }
 
 /// The default splitter, shared: repeated `format_table` calls at the default delimiter
 /// skip the regex compilation, which dwarfs the actual work on small tables.
-static DEFAULT_SPLIT_PATTERN: LazyLock<Regex> = LazyLock::new(|| split_pattern(DEFAULT_DIVIDE_BY));
+static DEFAULT_DIVIDER: LazyLock<Divider> = LazyLock::new(|| Divider::new(DEFAULT_DIVIDE_BY));
 
 /// Both delimiters must carry at least one leading and one trailing whitespace character,
 /// at distinct positions — so `" | "` and the default `"  "` are legal, but `"|"`, `"x"`,
@@ -176,15 +205,15 @@ fn empty_cell_filler(divide_by: &str, join_with: &str) -> &'static str {
 /// peel the outer frame of a Markdown-style row `| a | b |` so its pipes don't fuse onto
 /// the edge cells. One leading and one trailing core are stripped; the surrounding spaces
 /// are left to the split. A line without the frame is untouched.
-fn split_row<'a>(line: &'a str, pattern: &Regex, border: Option<(&str, &str)>) -> Vec<&'a str> {
+fn split_row<'a>(line: &'a str, splitter: &Divider, border: Option<(&str, &str)>) -> Vec<&'a str> {
     let mut inner = line.trim();
     if let Some((lead, trail)) = border {
         inner = inner.strip_prefix(lead).unwrap_or(inner);
         inner = inner.strip_suffix(trail).unwrap_or(inner);
     }
-    // Trim each cell, not the whole span: trimming the span would swallow an empty edge
-    // cell (`|  | a |`) and lose its column. Non-frame cells are already trim-stable.
-    pattern.split(inner).map(str::trim).collect()
+    // Cells are trimmed individually (inside `split`), not as a whole span: trimming the
+    // span would swallow an empty edge cell (`|  | a |`) and lose its column.
+    splitter.split(inner)
 }
 
 fn detect_column_properties(rows: &[Vec<&str>]) -> (Vec<usize>, Vec<bool>) {
@@ -257,7 +286,7 @@ fn format_row(
     }
 
     // Trim off the trailing separator. (Trailing-space stripping is NOT done here — it's a
-    // shared post-pass in `format_table`, so the folded path gets the identical treatment.)
+    // shared post-pass in `format_table`, so the split path gets the identical treatment.)
     out.truncate(out.len().saturating_sub(spacer.len()));
     out.push_str(trail); // closing frame
     out
@@ -304,9 +333,9 @@ pub enum FormatError {
     /// Two options were set that can't work together — e.g. `--emit-frame` needs the
     /// trailing padding that `--remove-trailing-spaces` strips, so the frame would go ragged.
     ConflictingOptions { first: &'static str, second: &'static str },
-    /// `--fold-row-width` was below the minimum that can hold a gutter and a column
+    /// `--split-until-width` was below the minimum that can hold a gutter and a column
     /// separator (< 2, or narrower than the `--join-with` delimiter).
-    FoldWidthTooSmall { width: usize, minimum: usize },
+    SplitWidthTooSmall { width: usize, minimum: usize },
     /// `--sentinel` was not a single, non-whitespace character.
     InvalidSentinel { value: String },
 }
@@ -325,9 +354,9 @@ impl fmt::Display for FormatError {
             Self::ConflictingOptions { first, second } => {
                 write!(f, "{first} cannot be combined with {second}")
             }
-            Self::FoldWidthTooSmall { width, minimum } => write!(
+            Self::SplitWidthTooSmall { width, minimum } => write!(
                 f,
-                "--fold-row-width {width} is too small: it must be at least {minimum}"
+                "--split-until-width {width} is too small: it must be at least {minimum}"
             ),
             Self::InvalidSentinel { value } => {
                 write!(f, "--sentinel {value:?} must be a single non-whitespace character")
@@ -364,12 +393,12 @@ pub struct FormatOptions {
     /// Wrap the table to at most this many visible columns per line: cells word-wrap within
     /// per-column caps and stack, continuation lines marked in a one-column gutter. `None`
     /// leaves lines full-width.
-    pub fold_row_width: Option<usize>,
-    /// Reverse a `fold_row_width` wrap: collapse the table back to one line per record
+    pub split_until_width: Option<usize>,
+    /// Reverse a `split_until_width` wrap: collapse the table back to one line per record
     /// (recover columns, drop placeholders, rejoin fragments) before formatting.
-    pub unfold: bool,
-    /// Marker character in the fold gutter and empty-cell placeholders (default `·`). Must
-    /// be non-whitespace. The **same** value has to be given to fold and to `unfold`.
+    pub unsplit: bool,
+    /// Marker character in the split gutter and empty-cell placeholders (default `·`). Must
+    /// be non-whitespace. The **same** value has to be given to the split and to `unsplit`.
     pub sentinel: char,
 }
 
@@ -382,8 +411,8 @@ impl Default for FormatOptions {
             header: None,
             trim_trailing: false,
             emit_frame: false,
-            fold_row_width: None,
-            unfold: false,
+            split_until_width: None,
+            unsplit: false,
             sentinel: DEFAULT_SENTINEL,
         }
     }
@@ -397,7 +426,7 @@ impl Default for FormatOptions {
 /// [`FormatError::SortColumnOutOfRange`] when `opts.sort` names a missing column,
 /// [`FormatError::InvalidDelimiter`] when `divide_by`/`join_with` lack leading and
 /// trailing whitespace, or [`FormatError::ConflictingOptions`] when incompatible options
-/// are combined (`emit_frame` with `trim_trailing`, or `emit_frame` with `fold_row_width`).
+/// are combined (`emit_frame` with `trim_trailing`, or `emit_frame` with `split_until_width`).
 #[must_use = "formatting allocates the whole table; ignoring it wastes the work"]
 pub fn format_table<S: AsRef<str> + Sync>(
     lines: &[S],
@@ -414,34 +443,34 @@ pub fn format_table<S: AsRef<str> + Sync>(
             second: "--remove-trailing-spaces",
         });
     }
-    // Folding breaks a line into pieces, so a per-record frame can't stay intact across them.
-    if opts.emit_frame && opts.fold_row_width.is_some() {
+    // Splitting breaks a line into pieces, so a per-record frame can't stay intact across them.
+    if opts.emit_frame && opts.split_until_width.is_some() {
         return Err(FormatError::ConflictingOptions {
             first: "--emit-frame",
-            second: "--fold-row-width",
+            second: "--split-until-width",
         });
     }
-    // The sentinel marks the fold gutter and placeholders, so it must be visible.
+    // The sentinel marks the split gutter and placeholders, so it must be visible.
     if opts.sentinel.is_whitespace() {
         return Err(FormatError::InvalidSentinel { value: opts.sentinel.to_string() });
     }
-    // A fold width narrower than a gutter + the output column separator can't lay out a
+    // A split width narrower than a gutter + the output column separator can't lay out a
     // row — and the output columns are joined with `join_with`, so that's the floor.
-    if let Some(width) = opts.fold_row_width {
+    if let Some(width) = opts.split_until_width {
         let minimum = visible_len(&opts.join_with).max(2);
         if width < minimum {
-            return Err(FormatError::FoldWidthTooSmall { width, minimum });
+            return Err(FormatError::SplitWidthTooSmall { width, minimum });
         }
     }
 
-    // --unfold: collapse a table wrapped by --fold-row-width back to one line per record
+    // --unsplit: collapse a table wrapped by --split-until-width back to one line per record
     // (recover columns, drop `·` placeholders, rejoin fragments), then format it normally.
     // The output columns are separated by `join_with`; re-emit cells joined by `divide_by`
-    // so the recursive format re-parses them. The inverse of --fold-row-width.
-    if opts.unfold {
-        let separator = split_pattern(&opts.join_with);
-        let collapsed = fold::unfold(lines, &separator, &opts.divide_by, opts.sentinel);
-        let reflow = FormatOptions { unfold: false, ..opts.clone() };
+    // so the recursive format re-parses them. The inverse of --split-until-width.
+    if opts.unsplit {
+        let separator = Divider::new(&opts.join_with);
+        let collapsed = split::unsplit(lines, &separator, &opts.divide_by, opts.sentinel);
+        let reflow = FormatOptions { unsplit: false, ..opts.clone() };
         return format_table(&collapsed, &reflow);
     }
 
@@ -451,12 +480,12 @@ pub fn format_table<S: AsRef<str> + Sync>(
 
     // Split every line into its cells, in parallel — lines are independent. The default
     // delimiter reuses the cached splitter; a custom one compiles its own.
-    let custom_pattern; // keeps a non-default splitter alive for the borrow below
-    let pattern = if opts.divide_by == DEFAULT_DIVIDE_BY {
-        &*DEFAULT_SPLIT_PATTERN
+    let custom_splitter; // keeps a non-default splitter alive for the borrow below
+    let splitter = if opts.divide_by == DEFAULT_DIVIDE_BY {
+        &*DEFAULT_DIVIDER
     } else {
-        custom_pattern = split_pattern(&opts.divide_by);
-        &custom_pattern
+        custom_splitter = Divider::new(&opts.divide_by);
+        &custom_splitter
     };
     // A delimiter with a visible core (`" | "`) frames Markdown-style rows as `| … |`;
     // peel that outer frame (one leading + one trailing core pipe) so it doesn't fuse onto
@@ -466,8 +495,8 @@ pub fn format_table<S: AsRef<str> + Sync>(
         (core, core)
     });
     // No-data cells (empty or whitespace-only) get a filler mark right at the split, so
-    // every later stage — width detection, sorting, folding, output — sees a real cell
-    // that survives re-splitting. Filled here once; `fold` relies on it. Emptiness is
+    // every later stage — width detection, sorting, splitting, output — sees a real cell
+    // that survives re-splitting. Filled here once; `split` relies on it. Emptiness is
     // judged on the *visible* text: a cell of pure ANSI codes is just as data-free, and
     // styling must never change layout.
     let filler = empty_cell_filler(&opts.divide_by, &opts.join_with);
@@ -477,7 +506,7 @@ pub fn format_table<S: AsRef<str> + Sync>(
     let mut rows: Vec<Vec<&str>> = lines
         .par_iter()
         .map(|line| {
-            let mut cells = split_row(line.as_ref(), pattern, border);
+            let mut cells = split_row(line.as_ref(), splitter, border);
             for cell in &mut cells {
                 if is_no_data(cell) {
                     *cell = filler;
@@ -499,8 +528,8 @@ pub fn format_table<S: AsRef<str> + Sync>(
     // Aligned wrapping: with a width budget, word-wrap cells within per-column caps and
     // stack them, instead of the one-line-per-record path below. (Framing is disallowed
     // alongside it, so there's no frame to reconcile here.)
-    let mut table = if let Some(budget) = opts.fold_row_width {
-        fold::render_wrapped(&rows, &widths, &is_numeric, &opts.join_with, budget, opts.sentinel)
+    let mut table = if let Some(budget) = opts.split_until_width {
+        split::render_wrapped(&rows, &widths, &is_numeric, &opts.join_with, budget, opts.sentinel)
     } else {
         // Optional output frame: re-add the join delimiter's edge halves around each line,
         // so a table joined with `" | "` reads back as `| … |`. Mirror image of `border`
@@ -581,15 +610,20 @@ pub struct Args {
     /// Wrap the table to at most N visible columns per line: cells word-wrap within
     /// per-column widths and stack, continuations marked with · in a one-column left gutter
     #[arg(long, value_name = "N")]
-    fold_row_width: Option<usize>,
+    split_until_width: Option<usize>,
 
-    /// Reverse --fold-row-width: collapse a wrapped table back to one line per record
-    /// (recover columns, drop placeholders, rejoin) — use the same -d/-j you folded with
+    /// Split rows to the terminal's current width — --split-until-width without the number.
+    /// The width comes from $COLUMNS, else the tty size, else 80
+    #[arg(long, conflicts_with_all = ["split_until_width", "emit_frame"])]
+    split_lines: bool,
+
+    /// Reverse --split-until-width: collapse a wrapped table back to one line per record
+    /// (recover columns, drop placeholders, rejoin) — use the same -d/-j you split with
     #[arg(long)]
-    unfold: bool,
+    unsplit: bool,
 
-    /// Marker character for the fold gutter and empty-cell placeholders [default: ·]. Must
-    /// be non-whitespace; pass the SAME one to --fold-row-width and --unfold
+    /// Marker character for the split gutter and empty-cell placeholders. Must
+    /// be non-whitespace; pass the SAME one to --split-until-width and --unsplit
     #[arg(long, value_name = "CHAR", default_value_t = DEFAULT_SENTINEL)]
     sentinel: char,
 }
@@ -607,11 +641,37 @@ impl Args {
             },
             trim_trailing: self.remove_trailing_spaces,
             emit_frame: self.emit_frame,
-            fold_row_width: self.fold_row_width,
-            unfold: self.unfold,
+            // --split-lines resolves to a concrete width HERE, at the CLI edge: the
+            // library stays pure — `format_table` never probes the environment.
+            split_until_width: self
+                .split_until_width
+                .or_else(|| self.split_lines.then(terminal_width)),
+            unsplit: self.unsplit,
             sentinel: self.sentinel,
         }
     }
+}
+
+/// The width `--split-lines` splits to, by precedence: an explicit `$COLUMNS` (the user's
+/// override, and the only rung visible from a non-tty), then the live terminal size —
+/// stdout first, falling back to stderr, which usually still points at the terminal when
+/// stdout is a pipe — then [`FALLBACK_TERMINAL_WIDTH`].
+fn terminal_width() -> usize {
+    let tty = console::Term::stdout()
+        .size_checked()
+        .or_else(|| console::Term::stderr().size_checked())
+        .map(|(_rows, cols)| cols as usize);
+    resolve_terminal_width(std::env::var("COLUMNS").ok().as_deref(), tty)
+}
+
+/// The pure precedence ladder behind [`terminal_width`], split out so it's testable
+/// without touching the process environment.
+pub(crate) fn resolve_terminal_width(columns_env: Option<&str>, tty_width: Option<usize>) -> usize {
+    columns_env
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&w| w > 0)
+        .or(tty_width)
+        .unwrap_or(FALLBACK_TERMINAL_WIDTH)
 }
 
 // ——— Library entry points ——————————————————————————————————————
@@ -700,4 +760,4 @@ pub fn run_with(args: Args) -> io::Result<()> {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-mod fold_tests;
+mod split_tests;

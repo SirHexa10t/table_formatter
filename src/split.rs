@@ -1,22 +1,21 @@
-//! Aligned line wrapping (`--fold-row-width` / `--unfold`).
+//! Aligned line wrapping (`--split-until-width` / `--unsplit`).
 //!
-//! When a table is wider than a `--fold-row-width` budget, [`render_wrapped`] chooses a
-//! width cap per column (fewest extra visual lines, deterministically, keeping words whole
-//! where possible), word-wraps each cell into fragments within its cap, and stacks a
-//! record's fragments into aligned visual lines. Every line carries a one-column left
+//! When a table is wider than a `--split-until-width` budget, [`render_wrapped`] chooses a
+//! width cap per column (a deterministic breakpoint-walking greedy — see [`allocate_caps`] —
+//! that keeps words whole for as long as words can fit), word-wraps each cell into
+//! fragments within its cap, and stacks a record's fragments into aligned visual lines. Every line carries a one-column left
 //! **gutter**: a space on a record's first line, the sentinel (default [`DEFAULT_SENTINEL`])
 //! on continuations. Empty slots get a lone sentinel so the column survives re-splitting,
 //! and a word forced to split mid-way gets a [`BREAK_HYPHEN`] so the break is visible and lossless.
 //!
-//! [`unfold`] reverses it, recovering columns and rejoining fragments. Padding is spaces;
+//! [`unsplit`] reverses it, recovering columns and rejoining fragments. Padding is spaces;
 //! the sentinel appears only in the gutter and empty slots. The same sentinel must be given
 //! to both directions.
 
 // The marker characters (sentinel, break hyphen) live with the rest of the tool's special
 // characters in lib.rs — this module only consumes them. The sentinel is passed explicitly
-// through both directions so fold and unfold can't drift apart.
-use crate::{visible_len, BREAK_HYPHEN};
-use regex::Regex;
+// through both directions so split and unsplit can't drift apart.
+use crate::{visible_len, Divider, BREAK_HYPHEN};
 use std::iter::repeat_n;
 
 /// Gutter on a record's first visual line.
@@ -100,7 +99,7 @@ fn word_ranges(s: &str) -> Vec<(usize, usize)> {
 }
 
 /// A wrapped piece of a cell: the borrowed text, plus whether a hyphen must follow it
-/// because a word was split mid-way here (so unfold rejoins the pieces with no space).
+/// because a word was split mid-way here (so unsplit rejoins the pieces with no space).
 struct Fragment<'a> {
     text: &'a str,
     hyphen: bool,
@@ -147,85 +146,10 @@ fn push_fragment<'a>(frags: &mut Vec<Fragment<'a>>, word: &'a str, cap: usize) {
     }
 }
 
-// ——— Column-width allocation ——————————————————————————————————————————————
-
-/// Estimated total visual lines at these caps: per record, the max over columns of the
-/// fragment count (a cell of width `w` in a column capped at `cap` needs `ceil(w/cap)`
-/// lines). A deliberate approximation of real word wrapping — cheap and deterministic,
-/// which is what the greedy needs; the render still wraps for real.
-fn est_lines(cell_w: &[Vec<usize>], caps: &[usize]) -> usize {
-    cell_w
-        .iter()
-        .map(|row| {
-            row.iter()
-                .zip(caps)
-                .map(|(&w, &cap)| if w == 0 { 1 } else { w.div_ceil(cap) })
-                .max()
-                .unwrap_or(1)
-        })
-        .sum()
-}
-
-/// Widest single word (visible width) in each column — the smallest cap that avoids
-/// breaking a word mid-way. At least 1.
-fn word_floors(rows: &[Vec<&str>], num_cols: usize) -> Vec<usize> {
-    let mut floor = vec![1usize; num_cols];
-    for row in rows {
-        for (c, cell) in row.iter().take(num_cols).enumerate() {
-            for word in cell.split(' ') {
-                floor[c] = floor[c].max(visible_len(word));
-            }
-        }
-    }
-    floor
-}
-
-/// Shrink `caps` one column at a time — the choice that adds the fewest estimated visual
-/// lines, ties toward the widest then leftmost column — until they fit `budget` or no
-/// column can drop below its `lower` bound. Deterministic.
-fn shrink_to_fit(caps: &mut [usize], cell_w: &[Vec<usize>], budget: usize, lower: &[usize]) {
-    while caps.iter().sum::<usize>() > budget {
-        let base = est_lines(cell_w, caps);
-        let mut best: Option<((usize, usize, usize), usize)> = None;
-        for c in 0..caps.len() {
-            if caps[c] <= lower[c].max(1) {
-                continue;
-            }
-            let mut trial = caps.to_vec();
-            trial[c] -= 1;
-            let added = est_lines(cell_w, &trial) - base;
-            let key = (added, usize::MAX - caps[c], c); // fewest lines, widest, leftmost
-            if best.is_none_or(|(best_key, _)| key < best_key) {
-                best = Some((key, c));
-            }
-        }
-        match best {
-            Some((_, c)) => caps[c] -= 1,
-            None => break,
-        }
-    }
-}
-
-/// Choose a width cap per column so `Σ caps ≤ budget`, minimizing the estimated number of
-/// visual lines. Two passes: first shrink no column below its widest word (so words stay
-/// whole); only if that still overflows do we break words as a last resort. A deterministic
-/// stand-in for a fuller search, swappable behind this signature.
-fn allocate_caps(rows: &[Vec<&str>], natural: &[usize], budget: usize) -> Vec<usize> {
-    let mut caps = natural.to_vec();
-    if caps.iter().sum::<usize>() <= budget {
-        return caps; // already fits — no wrapping
-    }
-    let cell_w: Vec<Vec<usize>> = rows
-        .iter()
-        .map(|row| (0..natural.len()).map(|c| row.get(c).map_or(0, |s| visible_len(s))).collect())
-        .collect();
-
-    let floors = word_floors(rows, natural.len());
-    let ones = vec![1usize; caps.len()];
-    shrink_to_fit(&mut caps, &cell_w, budget, &floors); // keep words whole where possible
-    shrink_to_fit(&mut caps, &cell_w, budget, &ones); // then break words if forced
-    caps
-}
+// Column-width allocation (the breakpoint-walking greedy + hyphenation fallback +
+// slack relaxation) lives in its own submodule, with its own tests.
+mod alloc;
+use alloc::allocate_caps;
 
 // ——— Rendering ————————————————————————————————————————————————————————————
 
@@ -292,7 +216,7 @@ pub(crate) fn render_wrapped(
                     }
                     Some(f) if !f.text.is_empty() => pad(&mut line, f.text, caps[c], is_numeric[c]),
                     // an empty or missing slot → a lone sentinel, so every column carries
-                    // something and its position survives unfold's re-split
+                    // something and its position survives unsplit's re-split
                     _ => placeholder(&mut line, caps[c], is_numeric[c], sentinel),
                 }
             }
@@ -302,7 +226,7 @@ pub(crate) fn render_wrapped(
     out
 }
 
-// ——— Reverse (unfold) —————————————————————————————————————————————————————
+// ——— Reverse (unsplit) —————————————————————————————————————————————————————
 
 /// Reverse of [`render_wrapped`]: collapse a wrapped table back to one line per record.
 ///
@@ -311,11 +235,11 @@ pub(crate) fn render_wrapped(
 /// output columns are joined by), drops the `sentinel` placeholders, rejoins each column's
 /// fragments (see [`rejoin_fragments`]), and re-emits the record's cells joined by `rejoin`
 /// (the input delimiter, so the caller can re-parse). `sentinel` **must** match the one used
-/// to fold — otherwise the gutters and placeholders aren't recognized and the result is
+/// to split — otherwise the gutters and placeholders aren't recognized and the result is
 /// garbled. Reversible up to whitespace normalization at wrap points.
-pub(crate) fn unfold<S: AsRef<str>>(
+pub(crate) fn unsplit<S: AsRef<str>>(
     lines: &[S],
-    separator: &Regex,
+    separator: &Divider,
     rejoin: &str,
     sentinel: char,
 ) -> Vec<String> {
@@ -329,7 +253,7 @@ pub(crate) fn unfold<S: AsRef<str>>(
         let line = line.as_ref();
         let mut chars = line.chars();
         let gutter = chars.next();
-        let frags: Vec<&str> = separator.split(chars.as_str().trim()).collect();
+        let frags: Vec<&str> = separator.split(chars.as_str().trim());
 
         if gutter == Some(sentinel) && open {
             for (c, &frag) in frags.iter().enumerate() {
@@ -426,6 +350,29 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_fragments_are_compact() {
+        // "recollect" correctness: words never flow to the next fragment while there is
+        // still room — no fragment's first word could have fit on the previous line
+        for (cell, cap) in [
+            ("a fairly long detail that must wrap", 10),
+            ("one two three four five", 7),
+            ("cccc dd", 4),
+            ("supercalifragilistic", 6), // hyphen-broken pieces are maximal too
+        ] {
+            let frags = wrap_cell(cell, cap);
+            for pair in frags.windows(2) {
+                let first_word = pair[1].text.split(' ').next().unwrap();
+                assert!(
+                    visible_len(pair[0].text) + 1 + visible_len(first_word) > cap,
+                    "{cell:?} at cap {cap}: {:?} still had room for {:?}",
+                    pair[0].text,
+                    first_word
+                );
+            }
+        }
+    }
+
+    #[test]
     fn wrap_cell_keeps_ansi_zero_width() {
         let cell = "\u{1b}[31mred\u{1b}[0m word"; // visible "red word" = 8 cols
         assert_eq!(shape(wrap_cell(cell, 4)), vec![("\u{1b}[31mred\u{1b}[0m", false), ("word", false)]);
@@ -452,18 +399,6 @@ mod tests {
     }
 
     #[test]
-    fn allocation_keeps_words_whole_and_wraps_the_other_column() {
-        // col 0 is one unbreakable word; col 1 can wrap at its space. The shrink is taken
-        // from col 1 so col 0's word stays intact, even though that costs a line.
-        let rows = vec![vec!["xxxxxxxx", "a b"], vec!["y", "c d"]];
-        let widths = vec![8, 3];
-        let caps = allocate_caps(&rows, &widths, 9);
-        assert_eq!(caps[0], 8, "the single-word column stays whole");
-        assert!(caps[1] < 3, "the wrappable column absorbs the shrink");
-        assert!(caps.iter().sum::<usize>() <= 9);
-    }
-
-    #[test]
     fn empty_continuation_slots_get_a_placeholder() {
         // col 1 wraps to 2 lines; col 0 is empty on the continuation → a lone marker
         let rows = vec![vec!["a", "one two"]];
@@ -481,8 +416,8 @@ mod tests {
     }
 
     #[test]
-    fn hard_break_shows_a_hyphen_and_unfolds_byte_exact() {
-        let sep = Regex::new(r"\s{2,}|\t+").unwrap();
+    fn hard_break_shows_a_hyphen_and_unsplits_byte_exact() {
+        let sep = Divider::new("  ");
         let rows = vec![vec!["x", "antidisestablishmentarianism"]];
         let wrapped = render_wrapped(&rows, &[1, 28], &[false, false], "  ", 14, DEFAULT_SENTINEL);
         // the split word is hyphenated, and no visual line exceeds the budget
@@ -490,23 +425,23 @@ mod tests {
         for l in &wrapped {
             assert!(visible_len(l) <= 14, "{l:?} overflows");
         }
-        // unfold rebuilds the word exactly — the hyphen is dropped, no space inserted
-        assert_eq!(unfold(&wrapped, &sep, "  ", DEFAULT_SENTINEL), vec!["x  antidisestablishmentarianism".to_string()]);
+        // unsplit rebuilds the word exactly — the hyphen is dropped, no space inserted
+        assert_eq!(unsplit(&wrapped, &sep, "  ", DEFAULT_SENTINEL), vec!["x  antidisestablishmentarianism".to_string()]);
     }
 
     #[test]
-    fn unfold_drops_placeholders_and_rejoins_fragments() {
-        let sep = Regex::new(r"\s{2,}|\t+").unwrap();
+    fn unsplit_drops_placeholders_and_rejoins_fragments() {
+        let sep = Divider::new("  ");
         let wrapped = vec![
             " a    one  x".to_string(),                   // head: a | one | x
             format!("{DEFAULT_SENTINEL}{DEFAULT_SENTINEL}    two  {DEFAULT_SENTINEL}"), // cont: · | two | ·
         ];
-        assert_eq!(unfold(&wrapped, &sep, "  ", DEFAULT_SENTINEL), vec!["a  one two  x".to_string()]);
+        assert_eq!(unsplit(&wrapped, &sep, "  ", DEFAULT_SENTINEL), vec!["a  one two  x".to_string()]);
     }
 
     #[test]
-    fn render_then_unfold_round_trips() {
-        let sep = Regex::new(r"\s{2,}|\t+").unwrap();
+    fn render_then_unsplit_round_trips() {
+        let sep = Divider::new("  ");
         let rows = vec![
             vec!["name", "detail"],
             vec!["foo", "a fairly long detail that must wrap"],
@@ -514,7 +449,7 @@ mod tests {
         ];
         let wrapped = render_wrapped(&rows, &[4, 35], &[false, false], "  ", 20, DEFAULT_SENTINEL);
         assert_eq!(
-            unfold(&wrapped, &sep, "  ", DEFAULT_SENTINEL),
+            unsplit(&wrapped, &sep, "  ", DEFAULT_SENTINEL),
             vec![
                 "name  detail".to_string(),
                 "foo  a fairly long detail that must wrap".to_string(),

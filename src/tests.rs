@@ -1,7 +1,7 @@
 use std::fs::File;
 use crate::{
     format_table, is_numeric_or_neutral, parse_numeric, read_from, read_lines, run_from,
-    split_pattern, split_row, visible_len, FormatError, FormatOptions,
+    split_row, visible_len, FormatError, FormatOptions, Divider,
 };
 use test_case::test_case;
 
@@ -225,7 +225,7 @@ fn delimiters_without_surrounding_whitespace_are_rejected() {
     assert_eq!(err.to_string(), "--join-with \"|\" must have leading and trailing whitespace (e.g. \" | \")");
 }
 
-// ——— No-data cells get a filler (base layer; fold relies on it) ————————————
+// ——— No-data cells get a filler (base layer; split relies on it) ————————————
 
 #[test]
 fn empty_cells_are_filled_with_the_no_data_marker() {
@@ -234,6 +234,20 @@ fn empty_cells_are_filled_with_the_no_data_marker() {
     let input = to_strings(&["a | one | x", "b |  | y"]);
     let opts = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
     assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["a  one  x", "b    -  y"]));
+}
+
+#[test]
+fn adjacent_delimiters_sharing_one_space_still_split() {
+    // `a | | b`: the single middle space flanks both pipes at once — the trailing
+    // whitespace of a delimiter is required but not consumed, so both pipes divide and
+    // the empty middle cell surfaces as the no-data filler
+    let input = to_strings(&["a | | b"]);
+    let opts = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
+    assert_eq!(format_table(&input, &opts).unwrap(), to_strings(&["a  -  b"]));
+
+    // …while a core glued to data is content, not a delimiter
+    let glued = to_strings(&["a | |b c"]);
+    assert_eq!(format_table(&glued, &opts).unwrap(), to_strings(&["a  |b c"]));
 }
 
 #[test]
@@ -268,9 +282,9 @@ fn heroes_fixture_preserves_all_cells_and_stays_stable() {
     let out = format_table(&raw, &opts).unwrap();
     assert_eq!(out.len(), raw.len());
 
-    let sep = split_pattern("  ");
+    let sep = Divider::new("  ");
     for line in &out {
-        let cells: Vec<&str> = sep.split(line.trim()).collect();
+        let cells: Vec<&str> = sep.split(line.trim());
         assert_eq!(cells.len(), 11, "column lost in {line:?}");
         assert!(cells.iter().all(|c| !c.trim().is_empty()), "empty cell survived in {line:?}");
     }
@@ -282,21 +296,21 @@ fn heroes_fixture_preserves_all_cells_and_stays_stable() {
 }
 
 #[test]
-fn heroes_fixture_folds_and_unfolds_preserving_content() {
-    // the filled cells ride through fold → unfold like any data
+fn heroes_fixture_splits_and_unsplits_preserving_content() {
+    // the filled cells ride through split → unsplit like any data
     let raw = read_lines("testing/table_w_empty_cells.txt").unwrap();
     let base = FormatOptions { divide_by: " | ".to_string(), ..Default::default() };
     let wide = format_table(&raw, &base).unwrap();
 
-    let folded = format_table(
+    let split = format_table(
         &raw,
-        &FormatOptions { fold_row_width: Some(80), ..base.clone() },
+        &FormatOptions { split_until_width: Some(80), ..base.clone() },
     )
     .unwrap();
-    for line in &folded {
+    for line in &split {
         assert!(visible_len(line) <= 80, "{line:?} is {} cols", visible_len(line));
     }
-    let restored = format_table(&folded, &FormatOptions { unfold: true, ..Default::default() }).unwrap();
+    let restored = format_table(&split, &FormatOptions { unsplit: true, ..Default::default() }).unwrap();
     assert_eq!(restored, wide);
 }
 
@@ -786,7 +800,7 @@ const SGR_STYLES: &[&str] = &["31", "32", "33", "34", "1", "4", "38;5;208"];
 /// ANSI style codes. Cell separators stay untouched, so the table's cells are identical.
 fn colorize_cells(lines: &[String], seed: u64) -> Vec<String> {
     let mut rng = Lcg(seed);
-    let pattern = split_pattern("  ");
+    let pattern = Divider::new("  ");
     lines
         .iter()
         .map(|line| {
