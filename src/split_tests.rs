@@ -164,6 +164,18 @@ fn split_lines_width_resolution_ladder() {
 }
 
 #[test]
+fn split_lines_behavior_is_reachable_from_the_library() {
+    // a dependent crate can do exactly what --split-lines does, without clap: detect the
+    // width (env-dependent here, so only sanity-checked) and hand it to format_table
+    let width = crate::terminal_width();
+    assert!(width >= 1, "terminal_width must always produce something usable");
+
+    let input = to_strings(&["a  b"]);
+    let opts = FormatOptions { split_until_width: Some(width.max(4)), ..Default::default() };
+    assert!(format_table(&input, &opts).is_ok());
+}
+
+#[test]
 fn split_lines_flag_conflicts_are_enforced_by_the_cli() {
     use clap::Parser;
     // --split-lines IS --split-until-width (auto) — giving both is contradictory, and the

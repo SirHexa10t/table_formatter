@@ -116,11 +116,21 @@ $ printf 'name  detail  qty\nfoo  a fairly long note that will not run off a nar
 The crate isn't on crates.io; add it as a path or git dependency, then either format lines directly:
 
 ```rust
-use table_formatter::{format_table, FormatOptions};
+use table_formatter::{format_table, read_input, terminal_width, FormatOptions};
 
-let lines: Vec<String> = std::fs::read_to_string("data.txt")?
-    .lines().map(String::from).collect();
-let opts = FormatOptions { sort: Some(1), ..Default::default() };
+// read_input routes exactly like the CLI's positional argument: "-"/empty = stdin,
+// an existing path = that file, anything else = inline data — as one buffer, so the
+// lines can be borrowed instead of copied.
+let text = read_input("data.txt")?;
+let lines: Vec<&str> = text.lines().collect();
+
+// every CLI flag has a FormatOptions counterpart; --split-lines is the composition of
+// terminal_width() (the $COLUMNS → tty → 80 ladder) with split_until_width:
+let opts = FormatOptions {
+    sort: Some(1),
+    split_until_width: Some(terminal_width()),
+    ..Default::default()
+};
 for line in format_table(&lines, &opts)? {
     println!("{line}");
 }

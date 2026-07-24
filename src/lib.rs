@@ -22,7 +22,7 @@ const DEFAULT_DIVIDE_BY: &str = "  ";
 const DEFAULT_JOIN_WITH: &str = "  ";
 /// `--split-lines`'s width when neither `$COLUMNS` nor a tty can say better: the
 /// traditional terminal width.
-pub(crate) const FALLBACK_TERMINAL_WIDTH: usize = 80;
+pub const FALLBACK_TERMINAL_WIDTH: usize = 80;
 
 // ——— Special characters ——————————————————————————————
 // The tool's marker vocabulary, kept together so no two roles collide by accident.
@@ -656,7 +656,13 @@ impl Args {
 /// override, and the only rung visible from a non-tty), then the live terminal size —
 /// stdout first, falling back to stderr, which usually still points at the terminal when
 /// stdout is a pipe — then [`FALLBACK_TERMINAL_WIDTH`].
-fn terminal_width() -> usize {
+///
+/// This is `--split-lines`'s whole behavior, exposed so a dependent crate can compose it
+/// itself: `FormatOptions { split_until_width: Some(terminal_width()), ..Default::default() }`.
+/// It probes the environment, which is exactly why [`format_table`] never calls it — width
+/// detection stays at the caller's edge, keeping the formatting itself deterministic.
+#[must_use]
+pub fn terminal_width() -> usize {
     let tty = console::Term::stdout()
         .size_checked()
         .or_else(|| console::Term::stderr().size_checked())
@@ -664,9 +670,11 @@ fn terminal_width() -> usize {
     resolve_terminal_width(std::env::var("COLUMNS").ok().as_deref(), tty)
 }
 
-/// The pure precedence ladder behind [`terminal_width`], split out so it's testable
-/// without touching the process environment.
-pub(crate) fn resolve_terminal_width(columns_env: Option<&str>, tty_width: Option<usize>) -> usize {
+/// The pure precedence ladder behind [`terminal_width`]: pass your own `$COLUMNS` value
+/// and/or tty measurement and get the width the tool would use. Split out so the policy
+/// is usable (and testable) without touching the process environment.
+#[must_use]
+pub fn resolve_terminal_width(columns_env: Option<&str>, tty_width: Option<usize>) -> usize {
     columns_env
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&w| w > 0)
@@ -685,7 +693,7 @@ pub fn run() -> io::Result<()> {
     run_from(std::env::args_os())
 }
 
-/// Run with an explicit argument list (argv[0] should be the program name).
+/// Run with an explicit argument list (argv\[0\] should be the program name).
 /// This lets another program invoke `table_formatter` in-process, as if it had
 /// executed the binary with those arguments.
 ///
@@ -716,8 +724,13 @@ pub fn read_lines(input: &str) -> io::Result<Vec<String>> {
 
 /// Read a command's whole input as one string, routed exactly like [`read_lines`]:
 /// `"-"` / empty reads stdin, an existing file path reads that file, anything else is
-/// inline data. Callers can then borrow line slices instead of owning each line.
-fn read_input(input: &str) -> io::Result<String> {
+/// inline data. This is the ingest the CLI itself uses — callers can then borrow line
+/// slices (`text.lines().collect::<Vec<&str>>()`) instead of owning each line, and
+/// [`format_table`] accepts them directly.
+///
+/// # Errors
+/// Any I/O error from reading stdin or opening/reading the file.
+pub fn read_input(input: &str) -> io::Result<String> {
     if input == "-" || input.is_empty() {
         return read_to_string_lossy(io::stdin().lock());
     }
